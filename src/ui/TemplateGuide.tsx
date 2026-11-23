@@ -1,9 +1,11 @@
 import { DEFAULT_PARTS, partSpec, type PartId, type ScorebookTemplate } from '@inkstat/basketball';
 import type { NormRect } from '@inkstat/ocr-engine';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { useState } from 'react';
+import { Image, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { Button, T } from './components';
 import { PART_COLORS } from './partColors';
+import { PhotoViewer } from './PhotoViewer';
 import { base, fonts, space, useColors } from './theme';
 
 /**
@@ -142,6 +144,7 @@ const QUESTIONS: { q: string; hint: string; parts: PartId[] }[] = [
 
 export function AskPhase({
   tpl,
+  photo,
   question,
   recognised,
   placing,
@@ -154,6 +157,8 @@ export function AskPhase({
   onAdvanced,
 }: {
   tpl: ScorebookTemplate;
+  /** The scorekeeper's photo, shown with each question so they can check their own page. */
+  photo: string | null;
   /** -1: the recognised-book screen; 0..n-1: a question; n: the summary. */
   question: number;
   /** The name of a built-in book this photo matched, if any. */
@@ -168,6 +173,7 @@ export function AskPhase({
   onAdvanced: () => void;
 }) {
   const c = useColors();
+  const [zoom, setZoom] = useState(false);
 
   // Still reading the printed labels: wait, so a recognised book can be offered first.
   if (placing && question <= 0) {
@@ -216,12 +222,18 @@ export function AskPhase({
           <T muted style={styles.counter}>{`QUESTION ${qi + 1} OF ${QUESTIONS.length}`}</T>
           <T style={base.h1}>{item.q}</T>
           <View style={[base.row, { alignItems: 'flex-start', gap: space.md }]}>
-            <PageHint parts={item.parts} />
+            <PageHint parts={item.parts} width={72} />
             <View style={{ flex: 1, gap: space.sm }}>
               <T style={{ fontSize: 15, lineHeight: 21 }}>{item.hint}</T>
-              <T muted style={base.small}>The coloured box shows where most scoresheets put it. Look at your page.</T>
+              <T muted style={base.small}>The coloured box shows where most scoresheets put it.</T>
             </View>
           </View>
+          {photo && (
+            <Pressable onPress={() => setZoom(true)} accessibilityRole="imagebutton" accessibilityLabel="Your page. Tap to zoom in." style={{ gap: 4 }}>
+              <Image source={{ uri: photo }} style={[styles.photo, { backgroundColor: c.sunken }]} resizeMode="contain" />
+              <T muted style={[base.small, { textAlign: 'center' }]}>Your page · tap to zoom in</T>
+            </Pressable>
+          )}
           <View style={{ gap: space.sm, marginTop: space.sm }}>
             {[true, false].map((v) => (
               <Pressable
@@ -237,6 +249,7 @@ export function AskPhase({
             ))}
           </View>
         </ScrollView>
+        {photo && <PhotoViewer photos={[{ uri: photo, label: 'Your page' }]} index={zoom ? 0 : null} onClose={() => setZoom(false)} />}
         <View style={styles.footer}>
           <Button title="Back" kind="secondary" onPress={() => (qi === 0 ? (recognised ? onQuestion(-1) : onBack()) : onQuestion(qi - 1))} />
         </View>
@@ -284,6 +297,7 @@ export function AskPhase({
 
 const styles = StyleSheet.create({
   page: { borderWidth: 1.5, borderRadius: 4, overflow: 'hidden' },
+  photo: { width: '100%', height: 230, borderRadius: 8 },
   line: { position: 'absolute', height: 1.5, borderRadius: 1 },
   num: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
   note: { borderRadius: 10, padding: space.md },

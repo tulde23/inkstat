@@ -174,6 +174,68 @@ const MIGRATIONS = [
   `
   CREATE INDEX results_by_season ON results (sport, season, date);
   `,
+  // 5: templates shared into groups (a change feed on the same seq), re-publish by the app's id, browsing.
+  `
+  ALTER TABLE templates ADD COLUMN source_id TEXT;
+  ALTER TABLE templates ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+  UPDATE templates SET updated_at = created_at;
+  CREATE UNIQUE INDEX templates_by_source ON templates (created_by, source_id) WHERE source_id IS NOT NULL;
+  CREATE INDEX templates_by_sport ON templates (sport, name);
+  CREATE INDEX team_templates_by_template ON team_templates (template_id);
+  CREATE TABLE group_templates (
+    group_id    TEXT    NOT NULL REFERENCES groups (id) ON DELETE CASCADE,
+    template_id TEXT    NOT NULL REFERENCES templates (id) ON DELETE CASCADE,
+    shared_by   TEXT    REFERENCES users (id) ON DELETE SET NULL,
+    shared_at   INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    deleted     INTEGER NOT NULL DEFAULT 0,
+    seq         INTEGER NOT NULL,
+    PRIMARY KEY (group_id, template_id)
+  );
+  CREATE INDEX group_templates_by_seq ON group_templates (group_id, seq);
+  CREATE INDEX group_templates_by_template ON group_templates (template_id);
+  `,
+  // 6: one-sided reports (each scorekeeper may know only their own team's score), reports
+  // matched across scorekeepers by the unordered pair of teams and a date within a day, so
+  // the old one-result-per-(sport, date, home, away) rule goes: a doubleheader is two games.
+  // Tables are rebuilt (SQLite can't drop a constraint). The new reports table points at
+  // results_new; renaming results_new to results rewrites that reference. The old reports
+  // table goes first, so dropping the old results cascades into nothing.
+  `
+  CREATE TABLE results_new (
+    id         TEXT PRIMARY KEY,
+    sport      TEXT NOT NULL,
+    season     TEXT NOT NULL,
+    date       TEXT NOT NULL,
+    home_id    TEXT NOT NULL REFERENCES teams (id),
+    away_id    TEXT NOT NULL REFERENCES teams (id),
+    created_at INTEGER NOT NULL
+  );
+  INSERT INTO results_new (id, sport, season, date, home_id, away_id, created_at)
+    SELECT id, sport, season, date, home_id, away_id, created_at FROM results;
+  CREATE TABLE result_reports_new (
+    result_id   TEXT NOT NULL REFERENCES results_new (id) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    home_score  INTEGER,
+    away_score  INTEGER,
+    periods     TEXT,
+    reported_at INTEGER NOT NULL,
+    source_id   TEXT,
+    PRIMARY KEY (result_id, user_id),
+    CHECK (home_score IS NOT NULL OR away_score IS NOT NULL)
+  );
+  INSERT INTO result_reports_new (result_id, user_id, home_score, away_score, periods, reported_at)
+    SELECT result_id, user_id, home_score, away_score, periods, reported_at FROM result_reports;
+  DROP TABLE result_reports;
+  DROP TABLE results;
+  ALTER TABLE results_new RENAME TO results;
+  ALTER TABLE result_reports_new RENAME TO result_reports;
+  CREATE INDEX results_by_home ON results (home_id, season);
+  CREATE INDEX results_by_away ON results (away_id, season);
+  CREATE INDEX results_by_season ON results (sport, season, date);
+  CREATE INDEX results_by_pair ON results (sport, home_id, away_id, date);
+  CREATE INDEX result_reports_by_source ON result_reports (user_id, source_id) WHERE source_id IS NOT NULL;
+  `,
 ];
 
 export function openDb(file: string): DB {

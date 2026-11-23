@@ -2,6 +2,8 @@ import { z } from 'zod';
 
 import type { Game } from '@inkstat/basketball';
 
+import { sheetSchema } from './sanitize';
+
 const stat = z.number().int().min(0).max(1000).nullable();
 const text = (max: number) => z.string().max(max).nullable();
 
@@ -72,6 +74,8 @@ export const templateSchema = z.object({
   photoUri: z.string().max(2000).nullable(),
   anchors: z.array(z.object({ text: z.string().max(120), x: unit, y: unit })).max(2000).optional(),
   builtinId: z.string().max(80).optional(),
+  /** One team or both on a page, and where home is. */
+  sheet: sheetSchema.optional(),
   test: z.object({ at: z.number(), seconds: z.number(), checks: z.number(), problems: z.number() }).nullable(),
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),

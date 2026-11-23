@@ -11,7 +11,7 @@ import { spaceFor, type KeyRing } from './auth/keys';
 import type { Docs, Store } from './db';
 import { ApiError } from './errors';
 import { groupSpace, type Groups } from './groups';
-import { FAVICON_SVG, HOME_HTML } from './home';
+import { FAVICON_SVG, HOME_HTML, INVITE_CODE, joinHtml } from './home';
 import { clientAddress, rateLimit } from './rateLimit';
 import type { Registry } from './registry';
 import { gameSchema, stripDeviceFiles, templateSchema } from './schema';
@@ -57,15 +57,22 @@ const schemas = {
   alias: z.object({ alias: z.string().trim().min(2).max(80) }),
   merge: z.object({ intoId: z.string().uuid() }),
   templateRef: z.object({ templateId: z.string().uuid() }),
-  result: z.object({
-    sport,
-    date: isoDate,
-    homeId: z.string().uuid(),
-    awayId: z.string().uuid(),
-    homeScore: score,
-    awayScore: score,
-    periods: z.object({ home: z.array(score.nullable()).max(12), away: z.array(score.nullable()).max(12) }).nullish(),
-  }),
+  /** One scorekeeper's final. Either score may be missing (only one team's page read), not both. */
+  result: z
+    .object({
+      sport,
+      date: isoDate,
+      homeId: z.string().uuid(),
+      awayId: z.string().uuid(),
+      homeScore: score.nullish(),
+      awayScore: score.nullish(),
+      periods: z
+        .object({ home: z.array(score.nullable()).max(12).nullish(), away: z.array(score.nullable()).max(12).nullish() })
+        .nullish(),
+      /** The app's id for the scanned game, so a re-report replaces and a doubleheader doesn't. */
+      sourceId: z.string().regex(/^[a-z0-9]{6,40}$/i).nullish(),
+    })
+    .refine((r) => r.homeScore != null || r.awayScore != null, { message: "Give at least one team's score.", path: ['homeScore'] }),
   roster: z.object({
     players: z.array(z.object({ number: z.string().trim().max(10).nullable(), name: z.string().trim().max(80).nullable() })).max(60),
   }),
@@ -122,6 +129,13 @@ export function createApp({
   });
   app.get('/favicon.svg', (c) => c.body(FAVICON_SVG, 200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' }));
   app.get('/favicon.ico', (c) => c.redirect('/favicon.svg', 301));
+  // A shared group invite. The page only echoes a well-formed code; it never looks one up.
+  app.get('/join/:code', (c) => {
+    const code = c.req.param('code').toUpperCase();
+    if (!INVITE_CODE.test(code)) return c.text('Not found', 404);
+    c.header('Cache-Control', 'no-store');
+    return c.html(joinHtml(code));
+  });
 
   const v1 = new Hono<Env>();
 
@@ -188,6 +202,12 @@ export function createApp({
     await next();
   };
   const writes = rateLimit<Env>(240, 60_000, (c) => `user:${c.get('user')?.id}`);
+  /** Publishing a template (to the registry or a group) is a bigger write: its own, tighter budget. */
+  const publishes = rateLimit<Env>(30, 60_000, (c) => `publish:${c.get('user')?.id}`);
+  const page = (c: C) => ({
+    since: Math.max(0, Number(c.req.query('since') ?? 0) || 0),
+    limit: Math.min(MAX_PAGE, Math.max(1, Number(c.req.query('limit') ?? MAX_PAGE) || MAX_PAGE)),
+  });
 
   const me = new Hono<Env>();
   me.use(signedIn);
@@ -375,6 +395,57 @@ export function createApp({
     return c.body(null, 204);
   });
 
+  // Templates shared with the group. Every one went through sanitizeLayout: printed words only, never a photo.
+  g.get('/:gid/templates', (c) => {
+    const gid = c.req.param('gid');
+    const u = c.get('user').id;
+    groups.require(gid, u);
+    const { since, limit } = page(c);
+    const changes = registry.groupTemplateChanges(gid, since, limit + 1, u);
+    const shown = changes.slice(0, limit);
+    return c.json({ changes: shown, cursor: shown.length ? shown[shown.length - 1].seq : since, more: changes.length > limit });
+  });
+  g.get('/:gid/templates/:tid', (c) => {
+    const gid = c.req.param('gid');
+    const u = c.get('user').id;
+    groups.require(gid, u);
+    const found = registry.groupTemplate(gid, c.req.param('tid'), u);
+    if (!found || found.deleted) throw ApiError.notFound('Template');
+    return c.json({ template: found.data, sharedBy: found.sharedBy, sharedAt: found.sharedAt, mine: found.mine, seq: found.seq });
+  });
+  /**
+   * Share a template: the app's whole template (sanitized, then published to the registry;
+   * the same app id from the same scorekeeper updates it), or `{ templateId }` of one already
+   * in the registry.
+   */
+  g.post('/:gid/templates', publishes, async (c) => {
+    const gid = c.req.param('gid');
+    const u = c.get('user').id;
+    groups.require(gid, u);
+    const raw = await c.req.json().catch(() => undefined);
+    const ref = schemas.templateRef.safeParse(raw);
+    let shared: ReturnType<typeof registry.shareTemplate>;
+    let droppedAnchors = 0;
+    if (ref.success && Object.keys(raw as object).length === 1) {
+      shared = registry.shareTemplate(gid, ref.data.templateId, u);
+    } else {
+      const clean = sanitizeLayout(raw);
+      shared = registry.publishToGroup(gid, clean.layout, u, clean.sourceId);
+      droppedAnchors = clean.droppedAnchors;
+    }
+    const { change, created } = shared;
+    return c.json(
+      { template: change.data, sharedBy: change.sharedBy, sharedAt: change.sharedAt, mine: change.mine, seq: change.seq, droppedAnchors },
+      created ? 201 : 200,
+    );
+  });
+  g.delete('/:gid/templates/:tid', (c) => {
+    const gid = c.req.param('gid');
+    const u = c.get('user').id;
+    registry.unshareTemplate(gid, c.req.param('tid'), u, groups.require(gid, u));
+    return c.body(null, 204);
+  });
+
   gamesRoutes(g, '/:gid', (c) => {
     const gid = c.req.param('gid')!;
     groups.require(gid, c.get('user').id);
@@ -430,10 +501,18 @@ export function createApp({
     return c.body(null, 204);
   });
 
-  templates.post('/', async (c) => {
-    const { layout, droppedAnchors } = sanitizeLayout(await c.req.json().catch(() => undefined));
-    const t = registry.addTemplate(layout.sport, layout.name, layout, c.get('user').id);
-    return c.json({ ...t, droppedAnchors }, 201);
+  /** Popular templates for a sport, for promoting into built-in books. Counts only; no people, teams or groups. */
+  templates.get('/', (c) => {
+    const s = sport.safeParse(c.req.query('sport') ?? 'basketball');
+    if (!s.success) throw ApiError.badRequest('InvalidRequest', 'Unknown sport.');
+    const q = (c.req.query('q') ?? '').slice(0, 80);
+    const limit = Number(c.req.query('limit') ?? 50) || 50;
+    return c.json({ templates: registry.browseTemplates(s.data, q, limit) });
+  });
+  templates.post('/', publishes, async (c) => {
+    const { layout, droppedAnchors, sourceId } = sanitizeLayout(await c.req.json().catch(() => undefined));
+    const t = registry.publishTemplate(layout, c.get('user').id, sourceId);
+    return c.json({ id: t.id, sport: t.sport, name: t.name, created: t.created, droppedAnchors }, t.created ? 201 : 200);
   });
   templates.get('/:id', (c) => c.json({ template: registry.template(c.req.param('id')) }));
 

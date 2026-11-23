@@ -53,24 +53,80 @@ export function isPrintedVocabulary(text: string): boolean {
   return ok[text.length];
 }
 
-const unit = z.number().min(0).max(1);
+/** Words a template's name may use besides printed vocabulary: scorebook makers and plain description. */
+const NAME_WORDS = new Set<string>([
+  'book', 'books', 'sheet', 'sheets', 'scoresheet', 'scoresheets', 'form', 'forms', 'short', 'long', 'full', 'size', 'page',
+  'pages', 'spiral', 'edition', 'version', 'new', 'old', 'my', 'our', 'copy', 'rec', 'recreation', 'youth', 'middle',
+  'high', 'jv', 'varsity', 'freshman', 'travel', 'aau', 'nfhs', 'ymca', 'glover', 'glovers', 'champion', 'markwort',
+  'mark', 'murray', 'hardwood', 'vanguard', 'right', 'it', 'style', 'standard', 'basic', 'simple', 'blue', 'red', 'green',
+  'white', 'black', 'yellow', 'orange', 'gold', 'purple', 'one', 'two', 'both', 'per', 'layout', 'template', 'stats',
+]);
+for (const layout of LIBRARY) {
+  for (const w of `${layout.name} ${layout.family}`.toLowerCase().split(/[^a-z0-9]+/)) if (w) NAME_WORDS.add(w);
+}
+
+/**
+ * The name a shared template goes out under. Scorekeepers name templates freely, and a
+ * name can hold a person ("Jordan's book"), often a minor's. Shared templates show in
+ * browse to anyone signed in, so a name is kept only when every word is scoresheet
+ * vocabulary, a scorebook maker, a plain describing word or a number; otherwise it
+ * becomes the built-in book's name, or a generic one.
+ */
+export function safeTemplateName(name: string, builtinId?: string | null): string {
+  const words = name.toLowerCase().replace(/['’]s\b/g, '').split(/[^a-z0-9]+/).filter(Boolean);
+  const ok = words.length > 0 && words.every((w) => /^\d+$/.test(w) || NAME_WORDS.has(w) || isPrintedVocabulary(w));
+  if (ok) return name.trim().replace(/\s+/g, ' ').slice(0, 80);
+  return LIBRARY.find((l) => l.id === builtinId)?.name ?? 'Shared scoresheet';
+}
+
+// The app's own range: a box may hang a little off the page edge.
+const unit = z.number().min(-0.5).max(1.5);
 const box = z.object({ x: unit, y: unit, w: unit, h: unit });
 const band = z.object({ x: unit, w: unit });
 
-export const layoutSchema = z.object({
-  sport: z.enum(SPORTS as [Sport, ...Sport[]]),
-  name: z.string().trim().min(1).max(80),
-  enabled: z.array(z.string().max(40)).max(60),
-  parts: z.record(z.string().max(40), z.union([box, band])),
-  variants: z.record(z.string().max(40), z.string().max(40)).default({}),
-  anchors: z.array(z.object({ text: z.string().max(80), x: unit, y: unit })).max(400).optional(),
-  builtinId: z.string().max(60).optional(),
+/** Whether a page holds one team or both, and where home is. */
+export const sheetSchema = z.object({
+  teams: z.enum(['one', 'both']),
+  homeAt: z.enum(['top', 'bottom', 'left', 'right']).optional(),
 });
 
-export type SharedLayout = z.infer<typeof layoutSchema>;
+/** Most anchors a shared layout keeps (after the vocabulary filter). */
+const MAX_SHARED_ANCHORS = 400;
 
-/** Drops unknown parts and every anchor that is not printed vocabulary; refuses a layout with nothing left. */
-export function sanitizeLayout(input: unknown): { layout: SharedLayout; droppedAnchors: number } {
+/**
+ * What a publish may send: a layout, or the app's whole stored template (version,
+ * photoUri, test and timestamps are ignored). `id` is the app's own template id, so
+ * publishing the same template again updates it instead of adding another.
+ */
+export const layoutSchema = z.object({
+  id: z.string().min(1).max(80).optional(),
+  sport: z.enum(SPORTS as [Sport, ...Sport[]]),
+  name: z.string().trim().min(1).max(120),
+  enabled: z.array(z.string().max(40)).max(80),
+  parts: z.record(z.string().max(40), z.union([box, band])),
+  variants: z.record(z.string().max(40), z.string().max(40)).default({}),
+  anchors: z.array(z.object({ text: z.string().max(120), x: unit, y: unit })).max(2000).optional(),
+  builtinId: z.string().max(80).optional(),
+  sheet: sheetSchema.optional(),
+});
+
+/** A shared layout as stored: never a photo, never the app's id, anchors only as printed words. */
+export interface SharedLayout {
+  sport: Sport;
+  name: string;
+  enabled: string[];
+  parts: Record<string, z.infer<typeof box> | z.infer<typeof band>>;
+  variants: Record<string, string>;
+  anchors?: { text: string; x: number; y: number }[];
+  builtinId?: string;
+  sheet?: z.infer<typeof sheetSchema>;
+}
+
+/**
+ * Drops unknown parts and every anchor that is not printed vocabulary; refuses a layout
+ * with nothing left. Every path that shares a template outside its owner goes through here.
+ */
+export function sanitizeLayout(input: unknown): { layout: SharedLayout; droppedAnchors: number; sourceId: string | null } {
   const parsed = layoutSchema.safeParse(input);
   if (!parsed.success) {
     throw ApiError.badRequest('InvalidTemplate', parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '));
@@ -79,17 +135,22 @@ export function sanitizeLayout(input: unknown): { layout: SharedLayout; droppedA
   const known = new Set<string>(CATALOGS[l.sport].parts.map((p) => p.id));
   const parts = Object.fromEntries(Object.entries(l.parts).filter(([id]) => known.has(id)));
   if (!Object.keys(parts).length) throw ApiError.badRequest('InvalidTemplate', 'The template has no marked parts.');
-  const anchors = (l.anchors ?? []).filter((a) => isPrintedVocabulary(a.text));
+  const anchors = (l.anchors ?? [])
+    .filter((a) => isPrintedVocabulary(a.text))
+    .slice(0, MAX_SHARED_ANCHORS)
+    .map((a) => ({ text: a.text, x: a.x, y: a.y }));
   return {
     layout: {
       sport: l.sport,
-      name: l.name,
+      name: safeTemplateName(l.name, l.builtinId),
       enabled: l.enabled.filter((id) => known.has(id)),
       parts,
       variants: Object.fromEntries(Object.entries(l.variants).filter(([id]) => known.has(id))),
       ...(anchors.length ? { anchors } : {}),
       ...(l.builtinId ? { builtinId: l.builtinId } : {}),
+      ...(l.sheet ? { sheet: { teams: l.sheet.teams, ...(l.sheet.homeAt ? { homeAt: l.sheet.homeAt } : {}) } } : {}),
     },
     droppedAnchors: (l.anchors?.length ?? 0) - anchors.length,
+    sourceId: l.id ?? null,
   };
 }

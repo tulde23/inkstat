@@ -70,11 +70,12 @@ export function T({ children, muted, style }: { children: ReactNode; muted?: boo
   return <Text style={[{ color: muted ? c.muted : c.text, fontFamily: fonts.body, fontSize: 15 }, style]}>{children}</Text>;
 }
 
-export type BadgeTone = 'warn' | 'error' | 'ok';
+export type BadgeTone = 'warn' | 'error' | 'ok' | 'waiting';
 
 export function Badge({ tone, label }: { tone: BadgeTone; label: string }) {
   const c = useColors();
-  const [bg, fg] = tone === 'warn' ? [c.warnBg, c.warn] : tone === 'error' ? [c.errorBg, c.error] : [c.okBg, c.ok];
+  const [bg, fg] =
+    tone === 'warn' ? [c.warnBg, c.warn] : tone === 'error' ? [c.errorBg, c.error] : tone === 'waiting' ? [c.sunken, c.muted] : [c.okBg, c.ok];
   return (
     <View style={[styles.badge, { backgroundColor: bg }]}>
       <Text style={{ color: fg, fontFamily: fonts.bodySemiBold, fontSize: 12 }}>{label}</Text>

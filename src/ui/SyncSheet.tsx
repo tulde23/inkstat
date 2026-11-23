@@ -2,15 +2,15 @@ import { useSQLiteContext } from 'expo-sqlite';
 import { useEffect, useRef, useState } from 'react';
 import { Modal, Pressable, StyleSheet, View } from 'react-native';
 
-import { signIn, signOut, useSession } from '@/auth/session';
-import { availableProviders, describeProviderError, SignInCancelled } from '@/auth/socialSignIn';
+import { signOut, useSession } from '@/auth/session';
 import { syncNow, type SyncResult } from '@/sync/client';
 
 import { Button, ProgressBar, T } from './components';
+import { SignInButtons } from './SignInButtons';
 import { fonts, radius, space, useColors } from './theme';
 
 type Phase =
-  | { kind: 'signin'; error?: string; busy?: boolean }
+  | { kind: 'signin'; busy?: boolean }
   | { kind: 'syncing'; fraction: number; step: string }
   | { kind: 'done'; result: SyncResult }
   | { kind: 'error'; message: string };
@@ -29,7 +29,7 @@ const summary = (r: SyncResult) => {
 
 /**
  * The sync button's window: "Syncing" with a progress bar, then "Done". Signs in
- * with Google first when there is no account on this phone. Nothing to configure.
+ * first (Apple on iPhone, Google) when there is no account on this phone.
  */
 export function SyncSheet({ visible, onClose, onSynced }: { visible: boolean; onClose: () => void; onSynced?: () => void }) {
   const db = useSQLiteContext();
@@ -63,20 +63,6 @@ export function SyncSheet({ visible, onClose, onSynced }: { visible: boolean; on
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
-  const google = async () => {
-    setPhase({ kind: 'signin', busy: true });
-    try {
-      await signIn('Google');
-      await run();
-    } catch (e) {
-      if (e instanceof SignInCancelled) setPhase({ kind: 'signin' });
-      else {
-        console.warn('[sign-in]', describeProviderError(e));
-        setPhase({ kind: 'signin', error: e instanceof Error ? e.message : 'Sign-in did not work. Try again.' });
-      }
-    }
-  };
-
   const busy = phase.kind === 'syncing' || (phase.kind === 'signin' && phase.busy);
 
   return (
@@ -94,12 +80,7 @@ export function SyncSheet({ visible, onClose, onSynced }: { visible: boolean; on
               <T muted style={styles.body}>
                 Your games and templates are kept with your account, so they are on every phone you sign in on.
               </T>
-              {availableProviders().includes('Google') ? (
-                <Button title="Sign in with Google" onPress={google} busy={phase.busy} />
-              ) : (
-                <T style={{ color: c.error }}>Sign-in is not set up in this build.</T>
-              )}
-              {phase.error ? <T style={{ color: c.error, fontSize: 14 }}>{phase.error}</T> : null}
+              <SignInButtons onSignedIn={run} onBusy={(busy) => setPhase((p) => (p.kind === 'signin' ? { kind: 'signin', busy } : p))} />
               {!phase.busy && <Button title="Not now" kind="secondary" onPress={onClose} />}
             </>
           )}
@@ -118,7 +99,7 @@ export function SyncSheet({ visible, onClose, onSynced }: { visible: boolean; on
               <Button title="OK" onPress={onClose} />
               {session && (
                 <View style={styles.account}>
-                  <T muted style={{ fontSize: 13, flex: 1 }}>{`Signed in as ${session.user.email}`}</T>
+                  <T muted style={{ fontSize: 13, flex: 1 }}>{`Signed in as ${session.user.displayName}`}</T>
                   <Pressable
                     accessibilityRole="button"
                     onPress={() => {

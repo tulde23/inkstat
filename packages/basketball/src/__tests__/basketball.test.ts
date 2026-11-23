@@ -19,11 +19,14 @@ import {
   gameToCsv,
   mergePlayers,
   normalizeDate,
+  today,
   perPeriodScores,
   readPage,
   seasonFor,
   seasonTotals,
   validateTeam,
+  validateGame,
+  wasRead,
   type Game,
   type PlayerLine,
 } from '..';
@@ -248,6 +251,61 @@ describe('validateTeam', () => {
     };
     expect(validateTeam(team, 'home')).toEqual([]);
   });
+
+  it("doesn't flag the other team when only one team's page was read", () => {
+    const home = { ...emptyTeam(), name: 'Lions', pageUri: 'file:///home.jpg', periodScores: [2, 3, 0, 0], totalPoints: 5, players: [player({ number: '3', points: 5 })] };
+    const game = { id: 'g', date: null, location: null, season: '2026-27', home, away: { ...emptyTeam(), name: 'Tigers' }, modelId: null, createdAt: 0, updatedAt: 0 };
+    expect(validateGame(game)).toEqual([]);
+    expect(wasRead(game.away)).toBe(false);
+  });
+
+  describe("books with quarter columns and a running score (Glover's Short Form)", () => {
+    const glover = (over: Partial<ReturnType<typeof emptyTeam>> = {}) => ({
+      ...emptyTeam(),
+      periodScores: [7, 4, 6, 3],
+      totalPoints: 20,
+      halfScore: 11,
+      runningScore: 20,
+      players: [
+        player({ number: '4', points: 12, periodPoints: [5, 2, 4, 1] }),
+        player({ number: '11', points: 8, periodPoints: [2, 2, 2, 2] }),
+      ],
+      ...over,
+    });
+
+    it('passes when every total agrees', () => {
+      expect(validateTeam(glover(), 'home')).toEqual([]);
+    });
+
+    it("flags a player whose quarter columns don't add up to their points", () => {
+      const team = glover({ players: [player({ number: '4', points: 12, periodPoints: [5, 2, 4, 3] }), player({ number: '11', points: 8, periodPoints: [2, 2, 2, 2] })] });
+      const issues = validateTeam(team, 'home');
+      expect(issues).toContainEqual(expect.objectContaining({ path: 'home.players.0.points', message: '#4: quarter columns add up to 14, but points say 12' }));
+      expect(issues).toContainEqual(expect.objectContaining({ path: 'home.periodScores.3', message: 'Player points in the 4th quarter add up to 5, but the 4th quarter box says 3' }));
+    });
+
+    it('only flags a quarter falling short when every cell was read', () => {
+      const partial = glover({ players: [player({ number: '4', points: 12, periodPoints: [5, 2, 4, 1] }), player({ number: '11', points: 8, periodPoints: [null, 2, 2, 2] })] });
+      expect(validateTeam(partial, 'home').map((i) => i.path)).not.toContain('home.periodScores.0');
+      const full = glover({ periodScores: [9, 4, 6, 3], totalPoints: 22, runningScore: 22, halfScore: 13 });
+      expect(validateTeam(full, 'home')).toContainEqual(expect.objectContaining({ path: 'home.periodScores.0' }));
+    });
+
+    it('checks the running score and half-time score against the boxes', () => {
+      const paths = validateTeam(glover({ runningScore: 18, halfScore: 10 }), 'home').map((i) => i.path);
+      expect(paths).toEqual(expect.arrayContaining(['home.runningScore', 'home.halfScore']));
+    });
+
+    it('names overtime periods', () => {
+      const team = glover({
+        periodScores: [7, 4, 6, 3, 2],
+        totalPoints: 22,
+        runningScore: 22,
+        players: [player({ number: '4', points: 14, periodPoints: [5, 2, 4, 1, 4] }), player({ number: '11', points: 8, periodPoints: [2, 2, 2, 2, 0] })],
+      });
+      expect(validateTeam(team, 'home').map((i) => i.message)).toContain('Player points in the overtime add up to 4, but the overtime box says 2');
+    });
+  });
 });
 
 describe('dates and seasons', () => {
@@ -256,6 +314,12 @@ describe('dates and seasons', () => {
     expect(normalizeDate('2026-1-5')).toBe('2026-01-05');
     expect(normalizeDate('Nov 14', 2026)).toBeNull();
     expect(normalizeDate('13/40/26')).toBeNull();
+  });
+
+  it("gives today's date on the phone's own calendar, for a sheet with no date", () => {
+    // 11:30 pm local on Nov 23 is already Nov 24 in UTC: the game was still played on the 23rd.
+    expect(today(new Date(2026, 10, 23, 23, 30))).toBe('2026-11-23');
+    expect(today(new Date(2027, 0, 5, 0, 5))).toBe('2027-01-05');
   });
 
   it('puts fall and winter games in the same season', () => {

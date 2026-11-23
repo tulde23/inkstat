@@ -1,4 +1,5 @@
-import { anchorsFrom, applyAffine, mapRect, matchLayout } from '../align';
+import { anchorsFrom, applyAffine, fitPerspective, isPerspective, mapRect, matchLayout } from '../align';
+import type { Affine } from '../align';
 import type { TextLine } from '../types';
 // Real ML Kit OCR of a scoresheet, as returned on a Pixel 10 Pro.
 import stars from './stars-ocr.json';
@@ -16,6 +17,34 @@ function rephotograph(lines: TextLine[], s: number, dx: number, dy: number, deg:
   };
   return lines.map((l) => ({ text: l.text, rect: rect(l.rect), words: l.words.map((w) => ({ text: w.text, rect: rect(w.rect) })) }));
 }
+
+/** The same page shot at an angle: a known perspective map applied to every word. */
+const TILT: Affine = { a: 0.82, b: 0.06, c: 0.05, d: -0.02, e: 0.8, f: 0.08, g: 0.18, h: 0.12 };
+function tilt(lines: TextLine[]): TextLine[] {
+  const rect = (q: { x: number; y: number; w: number; h: number }) => {
+    const c = applyAffine(TILT, q.x + q.w / 2, q.y + q.h / 2);
+    return { x: c.x - (q.w * 0.75) / 2, y: c.y - (q.h * 0.75) / 2, w: q.w * 0.75, h: q.h * 0.75 };
+  };
+  return lines.map((l) => ({ text: l.text, rect: rect(l.rect), words: l.words.map((w) => ({ text: w.text, rect: rect(w.rect) })) }));
+}
+
+describe('fitPerspective', () => {
+  it('recovers a known perspective map from point pairs', () => {
+    const pts = [[0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9], [0.5, 0.5], [0.3, 0.7], [0.7, 0.2], [0.2, 0.4], [0.8, 0.6]];
+    const pairs = pts.map(([x, y]) => {
+      const p = applyAffine(TILT, x, y);
+      return { ax: x, ay: y, px: p.x, py: p.y };
+    });
+    const t = fitPerspective(pairs)!;
+    for (const k of ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'] as const) expect(t[k]).toBeCloseTo(TILT[k]!, 6);
+  });
+
+  it('needs 8 pairs and refuses a mirrored page', () => {
+    expect(fitPerspective([{ ax: 0, ay: 0, px: 0, py: 0 }])).toBeNull();
+    const pts = [[0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9], [0.5, 0.5], [0.3, 0.7], [0.7, 0.2], [0.2, 0.4]];
+    expect(fitPerspective(pts.map(([x, y]) => ({ ax: x, ay: y, px: 1 - x, py: y })))).toBeNull();
+  });
+});
 
 describe('matchLayout', () => {
   const anchors = anchorsFrom(stars);
@@ -52,5 +81,25 @@ describe('matchLayout', () => {
       { text: 'Quarterly report', rect: { x: 0.5, y: 0.6, w: 0.2, h: 0.02 }, words: [] },
     ];
     expect(matchLayout(anchors, other)).toBeNull();
+  });
+
+  it('lines up a page shot at an angle, where an affine map cannot', () => {
+    const photo = tilt(stars);
+    const m = matchLayout(anchors, photo)!;
+    expect(isPerspective(m.transform)).toBe(true);
+    expect(m.score).toBeGreaterThan(0.8);
+    // Corners of the TP column land where the tilt puts them, not just its centre.
+    for (const [x, y] of [[0.812, 0.406], [0.837, 0.906]]) {
+      const got = applyAffine(m.transform, x, y);
+      const want = applyAffine(TILT, x, y);
+      expect(Math.hypot(got.x - want.x, got.y - want.y)).toBeLessThan(0.004);
+    }
+  });
+
+  it('stays affine on a flat, straight-on photo', () => {
+    const m = matchLayout(anchors, stars)!;
+    const p = applyAffine(m.transform, 0.9, 0.9);
+    expect(p.x).toBeCloseTo(0.9, 2);
+    expect(p.y).toBeCloseTo(0.9, 2);
   });
 });

@@ -54,6 +54,7 @@ const cropLabel = (regionId: string) => {
   if (regionId === 'quarters') return 'Score by quarter';
   if (regionId === 'final_score') return 'Final score';
   if (regionId === 'half_score') return 'Half-time score';
+  if (regionId === 'running_score') return 'Running score';
   if (regionId === 'timeouts') return 'Timeouts';
   if (regionId === 'team_fouls') return 'Team fouls';
   if (regionId.startsWith('detail_')) return regionId.slice(7).replace(/([A-Z])/g, ' $1').toLowerCase();
@@ -66,7 +67,7 @@ const cropLabel = (regionId: string) => {
 /** Every image InkStat read for a team: the page first, then each crop. */
 export function teamPhotos(team: TeamSheet): Photo[] {
   return [
-    ...(team.pageUri ? [{ uri: team.pageUri, label: 'Full page' }] : []),
+    ...(team.pageUri ? [{ uri: team.pageUri, label: 'Full page', page: true }] : []),
     ...team.crops.map((cr) => ({ uri: cr.uri, label: cropLabel(cr.regionId) })),
   ];
 }
@@ -87,7 +88,11 @@ export function photosFor(team: TeamSheet, issue: Issue): number[] {
         ? [(r) => r === 'quarters', (r) => r === 'summary']
         : p.field === 'totalPoints'
           ? [(r) => r === 'final_score', (r) => r === 'quarters', (r) => r === 'summary']
-          : [];
+          : p.field === 'halfScore'
+            ? [(r) => r === 'half_score', (r) => r === 'quarters', (r) => r === 'summary']
+            : p.field === 'runningScore'
+              ? [(r) => r === 'running_score']
+              : [];
   const out: number[] = [];
   for (const w of want) team.crops.forEach((cr, i) => w(cr.regionId) && !out.includes(i + offset) && out.push(i + offset));
   if (!out.length && team.pageUri) out.push(0);

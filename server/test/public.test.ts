@@ -73,6 +73,31 @@ describe('public scoreboard', () => {
     }
   });
 
+  it('leaves a game off until both scores are in, and still leaks nothing', async () => {
+    const { s, stars, rams } = await seeded();
+    const priya = (await s.signIn('priya')).accessToken;
+    const ozzie = (await s.signIn('ozzie')).accessToken;
+    // One scorekeeper read only Stars' page.
+    const one = { sport: 'basketball', date: '2026-12-12', homeId: stars.id, awayId: rams.id, homeScore: 55, sourceId: 'game0042' };
+    assert.equal((await s.call('POST', '/v1/results', one, priya)).status, 200);
+    let body = await json(await get(s, '/v1/public/scoreboard'));
+    assert.equal(body.results.length, 3, 'a partial game is not listed');
+    assert.deepEqual(body.seasons[0], { season: '2026-27', games: 3 });
+    // The Rams' scorekeeper reports their side, the next day and the other way round.
+    const other = { sport: 'basketball', date: '2026-12-13', homeId: rams.id, awayId: stars.id, homeScore: 41 };
+    assert.equal((await s.call('POST', '/v1/results', other, ozzie)).status, 200);
+    const res = await get(s, '/v1/public/scoreboard');
+    const text = await res.clone().text();
+    body = await json(res);
+    assert.equal(body.results.length, 4);
+    assert.deepEqual(body.seasons[0], { season: '2026-27', games: 4 });
+    const g = body.results[0];
+    assert.deepEqual(g, { id: g.id, date: '2026-12-12', home: { id: stars.id, score: 55 }, away: { id: rams.id, score: 41 }, status: 'reported' });
+    for (const secret of ['Jordan Minor', 'Secret League', 'dana', 'miles', 'priya', 'ozzie', 'example.com', 'reports', 'players', 'roster', 'game0042', 'known', 'partial']) {
+      assert.ok(!text.includes(secret), `public scoreboard must not include "${secret}"`);
+    }
+  });
+
   it('is empty, not an error, before anyone reports a score', async () => {
     const s = await makeServer();
     const body = await json(await get(s, '/v1/public/scoreboard'));

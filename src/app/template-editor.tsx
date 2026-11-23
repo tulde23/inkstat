@@ -113,7 +113,8 @@ function StatusChip({ status, c }: { status: PartStatus; c: Colors }) {
 
 export default function TemplateEditor() {
   // benchId (development): mark a test-bench sample's boxes; saving writes them to that sample.
-  const { id, uri, benchId } = useLocalSearchParams<{ id?: string; uri?: string; benchId?: string }>();
+  // sheet: how the page is laid out (JSON SheetLayout), when started from a scan that asked.
+  const { id, uri, benchId, sheet } = useLocalSearchParams<{ id?: string; uri?: string; benchId?: string; sheet?: string }>();
   const db = useSQLiteContext();
   const c = useColors();
   const { width: screenW, height: screenH } = useWindowDimensions();
@@ -158,9 +159,10 @@ export default function TemplateEditor() {
       }
       const count = (await listTemplates(db)).length;
       const tid = `tpl-${Date.now().toString(36)}`;
-      setTpl(newTemplate(tid, count ? `Scorebook ${count + 1}` : 'My scorebook', uri ? keepImage(uri, tid, 'photo') : null));
+      const fresh = newTemplate(tid, count ? `Scorebook ${count + 1}` : 'My scorebook', uri ? keepImage(uri, tid, 'photo') : null);
+      setTpl(sheet ? { ...fresh, sheet: parseSheet(sheet) } : fresh);
     })();
-  }, [db, id, uri, benchId]);
+  }, [db, id, uri, benchId, sheet]);
 
   // Save as you go: a reload, crash or accidental back never loses marked boxes.
   // (An unfinished template shows in the list as needing rows, names and points.)
@@ -287,6 +289,7 @@ export default function TemplateEditor() {
       {phase === 'pick' && !advanced && (
         <AskPhase
           tpl={tpl}
+          photo={photo}
           question={question}
           recognised={current?.library?.layout.name ?? null}
           placing={!!photo && placement?.uri !== photo}
@@ -1310,3 +1313,13 @@ const styles = StyleSheet.create({
   checkRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, minHeight: 44 },
   pill: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, overflow: 'hidden', fontSize: 13, fontFamily: fonts.bodySemiBold },
 });
+
+/** The page layout passed from a scan, if it parses. */
+function parseSheet(json: string): ScorebookTemplate['sheet'] {
+  try {
+    const v = JSON.parse(json) as ScorebookTemplate['sheet'];
+    return v && (v.teams === 'one' || v.teams === 'both') ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}

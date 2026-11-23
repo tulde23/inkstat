@@ -59,7 +59,7 @@ Railway notes:
 
 ## API
 
-Errors are `{ code, error }`; clients switch on `code`. Signed-in routes take `Authorization: Bearer <accessToken>`.
+Errors are `{ code, error }`; clients switch on `code`. Signed-in routes take `Authorization: Bearer <accessToken>`. Group and registry writes share a budget of 240 a minute per account; template publishes (registry or group) also have their own, 30 a minute.
 
 ### Sign-in and sessions
 
@@ -100,6 +100,20 @@ Each account has its own space, so a scorekeeper's games and templates follow th
 | GET | `/v1/groups/:gid/standings?season=` | W–L from results between the group's teams |
 | GET / PUT | `/v1/groups/:gid/rosters/:tid?season=` | `{ players: [{ number, name }] }`, members only |
 | * | `/v1/groups/:gid/games…`, `/v1/groups/:gid/seasons…` | The sync API below, for the group's games |
+| GET / POST / DELETE | `/v1/groups/:gid/templates[/:tid]` | Templates shared with the group; see below |
+
+### Group templates (members only)
+
+One scorekeeper teaches InkStat a scoresheet; everyone in their league gets it. Every shared template goes through `sanitizeLayout`: catalog parts only, anchors only when they are printed scoresheet words, never the photo, never the phone's own template id. A template shared with a group is also in the registry (so it counts toward browsing below). Non-members get `404`, as for every group route.
+
+| Method | Path | Who | Notes |
+| --- | --- | --- | --- |
+| POST | `/v1/groups/:gid/templates` | Any member | Body: the app's version-3 template (photo, `test` and timestamps are ignored), or `{ templateId }` of a registry template. → `201` when newly shared, `200` when it updated one already there: `{ template, sharedBy: { userId, name }, sharedAt, mine, seq, droppedAnchors }`. The same app `id` from the same scorekeeper updates their template (in every group it's in) instead of adding one. Up to 200 live templates per group (`403 TooManyTemplates`). |
+| GET | `/v1/groups/:gid/templates?since=<seq>&limit=<n>` | Any member | Change feed, oldest first: `{ changes: [{ id, deleted, updatedAt, seq, data, sharedBy, sharedAt, mine }], cursor, more }`. `data` is a version-3 template with the server's `id`, `photoUri: null` and `test: null`; unshared templates appear as `{ deleted: true, data: null }`. |
+| GET | `/v1/groups/:gid/templates/:tid` | Any member | `{ template, sharedBy, sharedAt, mine, seq }`; `404` once unshared |
+| DELETE | `/v1/groups/:gid/templates/:tid` | Whoever shared it, or an owner | Unshare (`403 NotYours` for other members). Leaves a tombstone in the feed; the registry copy stays. |
+
+Templates may carry `sheet: { teams: "one"|"both", homeAt?: "top"|"bottom"|"left"|"right" }` (one team per page or both, and where home is). Personal sync, registry publish and group publish all validate and keep it.
 
 ### Registry
 
@@ -112,13 +126,16 @@ Each account has its own space, so a scorekeeper's games and templates follow th
 | POST | `/v1/teams/:id/merge` | `{ intoId }`: a vote; two different scorekeepers merge it |
 | GET | `/v1/teams/:id/results?season=` | Record and results |
 | POST | `/v1/teams/:id/templates` | `{ templateId }`: "I read this team's book with this" |
-| POST / GET | `/v1/templates[/:id]` | A layout (parts, variants, anchors); unknown parts and non-vocabulary anchors are dropped |
-| POST | `/v1/results` | `{ sport, date, homeId, awayId, homeScore, awayScore, periods? }` → `reported`, `confirmed` (2 agree) or `disputed` |
-| GET / DELETE | `/v1/results/:id` | Read; withdraw my report |
+| POST / GET | `/v1/templates[/:id]` | A layout or the app's whole template; unknown parts and non-vocabulary anchors are dropped, the photo is never kept. With the app's `id`, publishing again updates it (`200`) instead of adding one (`201`): `{ id, sport, name, created, droppedAnchors }` |
+| GET | `/v1/templates?sport=&q=&limit=` | Popular templates, most scorekeepers first (default 50, at most 100): `{ templates: [{ id, name, sport, users, teams, groups, lastUsed }] }`. Counts only: never which scorekeepers, teams or groups. `users` counts distinct people who published, shared or used it on a team. `q` matches the name. |
+| POST | `/v1/results` | `{ sport, date, homeId, awayId, homeScore?, awayScore?, periods?: { home?, away? }, sourceId? }`: either score may be null (one team's page), not both. Joins the game other scorekeepers reported (same two teams either way round, within a day; see below) or starts one. Each side comes back as `{ id, name, score, state: known \| unknown \| conflicting, reports }`; status `partial` (a side unknown), `reported`, `confirmed` (both known, a side backed by 2+ scorekeepers) or `disputed` (a side conflicts) |
+| GET / DELETE | `/v1/results/:id` | Read; withdraw my report (the game goes when nobody reports it) |
+
+Matching a report to a game: the same sport and two teams (after merges), either way round, dated the same day or a day either side, where the reporter has no report yet. Closest date wins, then the same home team, then a game whose known scores agree. A game a day off is only joined if nothing conflicts; on the same date a conflict joins and disputes it. Scores and periods are mapped onto the stored home and away. A re-report replaces the scorekeeper's own report: the one with the same `sourceId` (the app's game id), or without ids, theirs for those teams on that date. With ids, a doubleheader stays two games. Standings count only games with both scores known and not disputed.
 
 ### Public scoreboard (anonymous, read-only)
 
-What https://inkstat.app (`web/`) shows. No sign-in; GET only; 120 requests a minute per address; CORS for inkstat.app; `Cache-Control: public, max-age=60`. Team names, places (town, state), dates and final scores only: never players, rosters, groups, scorekeepers or report counts. A disputed result has `null` scores.
+What https://inkstat.app (`web/`) shows. No sign-in; GET only; 120 requests a minute per address; CORS for inkstat.app; `Cache-Control: public, max-age=60`. Team names, places (town, state), dates and final scores only: never players, rosters, groups, scorekeepers or report counts. A disputed result has `null` scores. A game is listed (and counted in `seasons`) only once both teams' scores are reported: partial games stay off.
 
 | Method | Path | Notes |
 | --- | --- | --- |

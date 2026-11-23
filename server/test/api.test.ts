@@ -166,3 +166,26 @@ describe('parseKeys', () => {
     assert.equal(parseKeys(undefined).size, 0);
   });
 });
+
+describe('group invite page', () => {
+  it('shows a well-formed code with a link into the app, and never looks it up', async () => {
+    const s = await makeServer();
+    const res = await s.call('GET', '/join/abcd2345');
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    const html = await res.text();
+    assert.ok(html.includes('ABCD2345'));
+    assert.ok(html.includes('href="inkstat://join/ABCD2345"'));
+    // Not an invite alphabet (0, O, 1, I, L), too short, or markup: no page.
+    for (const bad of ['ABCD0123', 'ABC', '%3Cscript%3E']) assert.equal((await s.call('GET', `/join/${bad}`)).status, 404);
+  });
+
+  it("does not reveal a real group's name", async () => {
+    const s = await makeServer();
+    const a = await s.signIn('owner');
+    const created = await json(await s.call('POST', '/v1/groups', { name: 'Lakeview Eagles', kind: 'team' }, a.accessToken));
+    const html = await (await s.call('GET', `/join/${created.group.inviteCode}`)).text();
+    assert.ok(html.includes(created.group.inviteCode));
+    assert.ok(!html.includes('Lakeview'));
+  });
+});

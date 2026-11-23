@@ -213,4 +213,138 @@ export function syncNow(db: SQLiteDatabase, progress: Progress = () => undefined
   return running;
 }
 
+// ---------------------------------------------------------------- shared templates
+
+/**
+ * Templates shared with a group (a league or a team's scorekeepers), and the registry of
+ * templates other scorekeepers have taught InkStat. The server keeps only part boxes and
+ * printed scoresheet words, never a photo, so a downloaded template has `photoUri: null`
+ * and its id is the server's, not the id of the phone that made it.
+ */
+
+export interface SharedBy {
+  userId: string | null;
+  name: string | null;
+}
+
+export interface GroupTemplateChange {
+  /** The server's template id. */
+  id: string;
+  deleted: boolean;
+  updatedAt: number;
+  seq: number;
+  /** Null when unshared. */
+  data: ScorebookTemplate | null;
+  sharedBy: SharedBy | null;
+  sharedAt: number | null;
+  /** This account shared it. */
+  mine: boolean;
+}
+
+export interface SharedTemplate {
+  template: ScorebookTemplate;
+  sharedBy: SharedBy | null;
+  sharedAt: number | null;
+  mine: boolean;
+  seq: number;
+}
+
+export interface PublishedTemplate extends SharedTemplate {
+  /** Anchors left out because they weren't printed scoresheet words (names and the like). */
+  droppedAnchors: number;
+  /** False when this updated a template already shared. */
+  created: boolean;
+}
+
+export interface PopularTemplate {
+  id: string;
+  name: string;
+  sport: string;
+  /** Distinct scorekeepers who published, shared or used it. */
+  users: number;
+  teams: number;
+  groups: number;
+  lastUsed: number;
+}
+
+async function request<T>(method: string, path: string, body?: unknown): Promise<{ status: number; data: T }> {
+  let res: Response;
+  try {
+    res = await apiFetch(path, { method, body: body === undefined ? undefined : JSON.stringify(body) });
+  } catch (e) {
+    throw new SyncError(e instanceof ApiError ? e.message : String(e));
+  }
+  if (!res.ok) throw new SyncError(await detail(res));
+  return { status: res.status, data: (res.status === 204 ? undefined : await res.json()) as T };
+}
+
+const groupPath = (groupId: string, rest = '') => `/v1/groups/${encodeURIComponent(groupId)}/templates${rest}`;
+
+/**
+ * Shares one of this phone's templates with a group. Publishing the same template again
+ * updates the group's copy instead of adding another. The photo path is never sent.
+ */
+export async function publishTemplateToGroup(groupId: string, template: ScorebookTemplate): Promise<PublishedTemplate> {
+  const { status, data } = await request<Omit<PublishedTemplate, 'created'>>('POST', groupPath(groupId), { ...template, photoUri: null });
+  return { ...data, created: status === 201 };
+}
+
+/** Shares a template already on the server (one from browseTemplates, or another group) with a group. */
+export async function shareTemplateWithGroup(groupId: string, templateId: string): Promise<SharedTemplate> {
+  return (await request<SharedTemplate>('POST', groupPath(groupId), { templateId })).data;
+}
+
+/** One page of a group's template changes since `since` (0 for everything), oldest first. */
+export async function listGroupTemplates(
+  groupId: string,
+  since = 0,
+): Promise<{ changes: GroupTemplateChange[]; cursor: number; more: boolean }> {
+  return (await request<{ changes: GroupTemplateChange[]; cursor: number; more: boolean }>('GET', groupPath(groupId, `?since=${since}`))).data;
+}
+
+/**
+ * Every change to a group's templates since `since`, all pages. Keep `cursor` to ask for
+ * only what changed next time; `removed` lists ids unshared since then.
+ */
+export async function downloadGroupTemplates(
+  groupId: string,
+  since = 0,
+): Promise<{ templates: GroupTemplateChange[]; removed: string[]; cursor: number }> {
+  const latest = new Map<string, GroupTemplateChange>();
+  let cursor = since;
+  for (;;) {
+    const page = await listGroupTemplates(groupId, cursor);
+    for (const c of page.changes) latest.set(c.id, c);
+    cursor = page.cursor;
+    if (!page.more) break;
+  }
+  const all = [...latest.values()];
+  return {
+    templates: all.filter((c) => !c.deleted && c.data).map((c) => ({ ...c, data: { ...c.data!, photoUri: null } })),
+    removed: all.filter((c) => c.deleted).map((c) => c.id),
+    cursor,
+  };
+}
+
+/** One template shared with a group. */
+export async function getGroupTemplate(groupId: string, templateId: string): Promise<SharedTemplate> {
+  const { data } = await request<SharedTemplate>('GET', groupPath(groupId, `/${encodeURIComponent(templateId)}`));
+  return { ...data, template: { ...data.template, photoUri: null } };
+}
+
+/** Takes a template back out of a group. Only whoever shared it, or a group owner. */
+export async function unshareGroupTemplate(groupId: string, templateId: string): Promise<void> {
+  await request<void>('DELETE', groupPath(groupId, `/${encodeURIComponent(templateId)}`));
+}
+
+/** Widely used templates for a sport, most scorekeepers first, optionally matching a name. */
+export async function browseTemplates(
+  options: { sport?: string; q?: string; limit?: number } = {},
+): Promise<PopularTemplate[]> {
+  const params = new URLSearchParams({ sport: options.sport ?? 'basketball' });
+  if (options.q) params.set('q', options.q);
+  if (options.limit) params.set('limit', String(options.limit));
+  return (await request<{ templates: PopularTemplate[] }>('GET', `/v1/templates?${params}`)).data.templates;
+}
+
 export { SyncError };

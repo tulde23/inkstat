@@ -74,6 +74,25 @@ describe('sign in with Google and Apple', () => {
     assert.equal((await s.call('GET', '/v1/me', undefined, session.accessToken)).status, 401);
   });
 
+  it('keeps working with a Hide My Email relay address', async () => {
+    const s = await makeServer();
+    const relay = 'x7k2p9q4@privaterelay.appleid.com';
+    // First sign-in: Apple gives the name to the app, and the token carries the relay address (claims as strings).
+    const first = await s.apple.sign({ sub: 'a-relay', email: relay, email_verified: 'true', is_private_email: 'true', nonce: sha256('r1') });
+    const a = await json(await s.call('POST', '/v1/auth/social', { provider: 'Apple', idToken: first, nonce: 'r1', displayName: 'Dana Ghastly' }));
+    assert.equal(a.user.displayName, 'Dana Ghastly');
+
+    // The person turns forwarding off for InkStat: Apple says so, and nothing ends.
+    const notice = await s.apple.sign({ events: JSON.stringify({ type: 'email-disabled', sub: 'a-relay', email: relay }) });
+    assert.equal((await s.call('POST', '/v1/auth/apple/notifications', { payload: notice })).status, 200);
+
+    // A later sign-in finds the account by Apple's subject alone, even with no address in the token.
+    const later = await s.apple.sign({ sub: 'a-relay', nonce: sha256('r2') });
+    const b = await json(await s.call('POST', '/v1/auth/social', { provider: 'Apple', idToken: later, nonce: 'r2' }));
+    assert.equal(b.user.id, a.user.id);
+    assert.equal((await s.call('GET', '/v1/me', undefined, b.accessToken)).status, 200);
+  });
+
   it("Apple's consent-revoked removes the link and ends sessions only when it was the last way in", async () => {
     const s = await makeServer();
     const nonce = 'n2';

@@ -94,10 +94,17 @@ export default function Home() {
   const more = () =>
     dialog.actions('More', [
       { label: 'Sync', hint: 'Your games and templates on all your devices', onPress: () => setSyncing(true) },
-      { label: 'Scoresheet templates', hint: 'Teach InkStat your scorebook', onPress: () => router.push('/templates') },
+      { label: 'Account', hint: 'Sign in, groups and invite links', onPress: () => router.push('/account') },
       { label: 'Season stats and export', hint: 'Every player, CSV', onPress: () => router.push('/season') },
-      { label: 'Reading model', hint: model?.name, onPress: () => router.push('/models') },
       { label: 'Appearance', hint: THEME_LABEL[getThemePreference()], onPress: chooseTheme },
+      { label: 'Advanced', hint: 'Scoresheet templates, reading model', onPress: openAdvanced },
+    ]);
+
+  // Rarely needed: scans recognise the scoresheet and only ask to set one up when it's new.
+  const openAdvanced = () =>
+    dialog.actions('Advanced', [
+      { label: 'Scoresheet templates', hint: 'See, fix or build them part by part', onPress: () => router.push('/templates') },
+      { label: 'Reading model', hint: model?.name, onPress: () => router.push('/models') },
     ]);
 
   const chooseTheme = () => {
@@ -411,6 +418,8 @@ function Leaders({ games, colors, onTeam }: { games: Game[]; colors: Record<stri
 function GameRow({ game, onDelete }: { game: Game; onDelete: () => void }) {
   const issues = validateGame(game);
   const errors = issues.filter((i) => i.severity === 'error').length;
+  // Only one team's page was read and the other team's score isn't in yet.
+  const waiting = teamScore(game.home) === null || teamScore(game.away) === null;
   return (
     <Pressable
       onPress={() => router.push({ pathname: '/game/[id]', params: { id: game.id } })}
@@ -434,6 +443,8 @@ function GameRow({ game, onDelete }: { game: Game; onDelete: () => void }) {
             <Badge tone="error" label={`${errors} error${errors === 1 ? '' : 's'}`} />
           ) : issues.length > 0 ? (
             <Badge tone="warn" label={`${issues.length} to check`} />
+          ) : waiting ? (
+            <Badge tone="waiting" label="Waiting for scores" />
           ) : (
             <Badge tone="ok" label="Checked" />
           )}

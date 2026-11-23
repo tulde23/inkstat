@@ -89,10 +89,22 @@ export interface Template<Id extends string = string> {
   anchors?: Anchor[];
   /** Built-in layout this template started from, if any. */
   builtinId?: string;
+  /** How the page is laid out: one team (or entrant) per page, or both on one page and where home is. */
+  sheet?: SheetLayout;
   /** Last test read on that photo. */
   test: { at: number; seconds: number; checks: number; problems: number } | null;
   createdAt: number;
   updatedAt: number;
+}
+
+/** Where the home team's half is on a page that holds both teams. */
+export type HomeAt = 'top' | 'bottom' | 'left' | 'right';
+
+/** One team per page (a book spread, or separate sheets), or both teams on one page. */
+export interface SheetLayout {
+  teams: 'one' | 'both';
+  /** With both teams on the page: where home is. */
+  homeAt?: HomeAt;
 }
 
 /** A built-in layout: a known form's printed labels and its boxes, in reference-image coordinates. */
@@ -105,6 +117,8 @@ export interface BuiltinLayout<Id extends string = string> {
   enabled: Id[];
   parts: Partial<Record<Id, NormRect | Band>>;
   variants: Partial<Record<Id, string>>;
+  /** How the page is laid out; one team per page when left out. */
+  sheet?: SheetLayout;
 }
 
 /** One line of a test read: what was read for a part and whether it looks right. */
@@ -376,4 +390,84 @@ export function placeFromHeadings<Id extends string>(lines: TextLine[], c: Catal
     found.push(p.id);
   }
   return { parts, found };
+}
+
+/** A built-in layout as a template: reference boxes and anchors, lined up per photo by templateForPhoto. */
+export function builtinTemplate<Id extends string>(layout: BuiltinLayout<Id>, sportId: string, now = Date.now()): Template<Id> {
+  return {
+    version: 3,
+    sport: sportId,
+    id: `builtin-${layout.id}`,
+    name: layout.name,
+    enabled: layout.enabled,
+    parts: layout.parts,
+    variants: layout.variants,
+    photoUri: null,
+    anchors: layout.anchors,
+    builtinId: layout.id,
+    sheet: layout.sheet ?? { teams: 'one' },
+    test: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+/**
+ * What a photo is, before reading it:
+ *   - sure: a known form; read it straight away.
+ *   - partly: some printed labels match a known form, not enough to be sure; ask.
+ *   - none: printed text was read but matches nothing known; teach InkStat this form.
+ *   - notext: almost nothing printed was read; it's the photo (blur, dark, too far).
+ */
+export type Recognition<Id extends string = string> =
+  | { kind: 'sure' | 'partly'; template: Template<Id>; match: LayoutMatch; spread: 'left' | 'right' | null; words: number }
+  | { kind: 'none'; words: number }
+  | { kind: 'notext'; words: number };
+
+/** Fewer printed words than this and the photo itself is the problem. */
+const MIN_WORDS = 6;
+const SURE_AGREEMENT = 0.5;
+const PARTLY_INLIERS = 4;
+const PARTLY_SCORE = 0.12;
+/** A one-team page covering less of the photo's width than this is half of a book spread. */
+const SPREAD_WIDTH = 0.65;
+
+/**
+ * Recognise a photo against known forms: the user's (and their league's) templates
+ * that have saved labels, then the built-in books. The best match wins; a template
+ * made from a built-in book beats the book itself on a tie, since it may be adjusted.
+ */
+export function recognizeForm<Id extends string, G extends string>(
+  lines: TextLine[],
+  templates: Template<Id>[],
+  sport: Pick<SportModule<Id, G>, 'id' | 'library'>,
+): Recognition<Id> {
+  const words = lines
+    .flatMap((l) => (l.words.length ? l.words : [{ text: l.text }]))
+    .filter((w) => /[a-z]{2,}/i.test(w.text)).length;
+  if (words < MIN_WORDS) return { kind: 'notext', words };
+
+  const own = templates.filter((t) => t.anchors?.length);
+  const ownBuiltins = new Set(own.map((t) => t.builtinId).filter(Boolean));
+  const candidates = [...own, ...sport.library.filter((l) => !ownBuiltins.has(l.id)).map((l) => builtinTemplate(l, sport.id))];
+
+  let best: { template: Template<Id>; match: LayoutMatch } | null = null;
+  for (const template of candidates) {
+    const match = matchLayout(template.anchors!, lines);
+    if (!match) continue;
+    if (!best || match.score > best.match.score) best = { template, match };
+  }
+  if (!best) return { kind: 'none', words };
+  const { template, match } = best;
+  const sure = match.inliers >= MIN_INLIERS && match.score >= MIN_SCORE && match.agreement >= SURE_AGREEMENT;
+  const partly = match.inliers >= PARTLY_INLIERS && match.score >= PARTLY_SCORE;
+  if (!sure && !partly) return { kind: 'none', words };
+
+  // A one-team page that fills only part of the photo's width: a book spread with both teams.
+  let spread: 'left' | 'right' | null = null;
+  if ((template.sheet?.teams ?? 'one') === 'one') {
+    const page = mapRect(match.transform, { x: 0, y: 0, w: 1, h: 1 });
+    if (page.w < SPREAD_WIDTH) spread = page.x + page.w / 2 < 0.5 ? 'left' : 'right';
+  }
+  return { kind: sure ? 'sure' : 'partly', template, match, spread, words };
 }

@@ -13,10 +13,11 @@ export {
   type RunOptions,
 } from './pipeline';
 export { DEFAULT_MODEL_ID, MODEL_CATALOG, getModel, type ModelFile, type ModelSpec } from './models';
-export { anchorText, anchorsFrom, applyAffine, mapRect, matchLayout, type Affine, type Anchor, type LayoutMatch } from './align';
+export { anchorText, anchorsFrom, applyAffine, fitPerspective, isPerspective, mapRect, matchLayout, type Affine, type Anchor, type LayoutMatch } from './align';
 export {
   alignParts as alignTemplateParts,
   anchorsForTemplate,
+  builtinTemplate,
   fullRect,
   isBandPart,
   isUsable,
@@ -25,6 +26,7 @@ export {
   newTemplate,
   normalizeTemplate,
   placeFromHeadings,
+  recognizeForm,
   specOf,
   suggestParts,
   templateForPhoto,
@@ -32,6 +34,9 @@ export {
   variantOf,
   type Band,
   type BuiltinLayout,
+  type HomeAt,
+  type Recognition,
+  type SheetLayout,
   type Catalog,
   type LibraryMatch,
   type PartCheck,

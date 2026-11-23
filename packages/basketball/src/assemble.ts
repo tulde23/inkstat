@@ -282,6 +282,11 @@ export function normalizeDate(raw: string | null, fallbackYear = new Date().getF
   return fmt(year, +us[1], +us[2]);
 }
 
+/** Today on this phone's calendar (local time, not UTC), as yyyy-mm-dd. */
+export function today(now: Date = new Date()): string {
+  return fmt(now.getFullYear(), now.getMonth() + 1, now.getDate())!;
+}
+
 function fmt(y: number, m: number, d: number): string | null {
   if (m < 1 || m > 12 || d < 1 || d > 31) return null;
   return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;

@@ -5,7 +5,7 @@ import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 
 import { clearTombstone, deleteGame, saveGame } from '@/db';
-import { gameToCsv, gameToJson, teamScore, validateGame, type Game, type Side } from '@inkstat/basketball';
+import { gameToCsv, gameToJson, teamScore, validateGame, wasRead, type Game, type Side } from '@inkstat/basketball';
 import { deleteGameImages, shareText } from '@/lib/files';
 import { sideName, useGame } from '@/lib/useGame';
 import { T } from '@/ui/components';
@@ -92,6 +92,8 @@ export default function GameSummary() {
     return h === null || a === null || h === a ? null : h > a ? 'home' : 'away';
   })();
   const when = [formatDate(game.date), game.location].filter(Boolean).join(' · ');
+  // A side whose page wasn't read and whose score isn't in yet: the other scorekeeper's scan, or a typed score, fills it.
+  const waitingFor = SIDES.find((s) => !wasRead(game[s]) && teamScore(game[s]) === null) ?? null;
 
   return (
     <>
@@ -124,13 +126,32 @@ export default function GameSummary() {
                   {sideName(game, s)}
                 </T>
                 <T muted style={{ fontSize: 12, fontFamily: fonts.bodySemiBold }}>{s === 'home' ? 'HOME' : 'AWAY'}</T>
-                <T style={{ fontSize: 34, fontFamily: fonts.monoBold, minWidth: 60, textAlign: 'right', color: winner && winner !== s ? c.muted : c.text }}>
-                  {teamScore(game[s]) ?? '–'}
-                </T>
+                {waitingFor === s ? (
+                  <T muted style={{ fontSize: 14, fontFamily: fonts.bodySemiBold, minWidth: 60, textAlign: 'right' }}>Waiting</T>
+                ) : (
+                  <T style={{ fontSize: 34, fontFamily: fonts.monoBold, minWidth: 60, textAlign: 'right', color: winner && winner !== s ? c.muted : c.text }}>
+                    {teamScore(game[s]) ?? '–'}
+                  </T>
+                )}
               </View>
             </View>
           ))}
         </View>
+
+        {waitingFor && (
+          <View style={[styles.flag, { backgroundColor: c.sunken }]}>
+            <T style={{ fontSize: 16, fontFamily: fonts.bodyBold }}>Waiting for scores</T>
+            <T style={{ fontSize: 14, lineHeight: 20 }}>
+              {`Only one team’s page was read. ${game[waitingFor].name ? `${game[waitingFor].name}’s` : 'The other team’s'} score fills in when their scorekeeper scans their page, or you can add it.`}
+            </T>
+            <Pressable
+              onPress={() => router.push({ pathname: '/game/box', params: { id: game.id, side: waitingFor, edit: 'team' } })}
+              accessibilityRole="button"
+              style={[styles.smallButton, { borderWidth: 1.5, borderColor: c.accent }]}>
+              <T style={{ color: c.accent, fontFamily: fonts.bodySemiBold, fontSize: 15 }}>Add the score myself</T>
+            </Pressable>
+          </View>
+        )}
 
         {/* Check before it counts */}
         {issues.length > 0 ? (

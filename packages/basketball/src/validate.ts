@@ -38,6 +38,14 @@ export function validateTeam(team: TeamSheet, side: Side, rules = DEFAULT_RULES)
         message: `${who}: ${p.fouls} fouls is over the ${rules.foulLimit}-foul limit`,
       });
     }
+    const own = p.periodPoints?.length ? sum(p.periodPoints) : null;
+    if (p.points !== null && own !== null && own !== p.points) {
+      issues.push({
+        severity: 'warning',
+        path: at(`${row}.points`),
+        message: `${who}: quarter columns add up to ${own}, but points say ${p.points}`,
+      });
+    }
     if (p.points !== null && p.fg2 !== null && p.fg3 !== null && p.ftMade !== null) {
       const expected = 2 * p.fg2 + 3 * p.fg3 + p.ftMade;
       if (expected !== p.points) {
@@ -94,14 +102,66 @@ export function validateTeam(team: TeamSheet, side: Side, rules = DEFAULT_RULES)
       message: `Period scores add up to ${periodTotal}, but the final score says ${team.totalPoints}`,
     });
   }
+  // Books with a column per quarter: every player's quarter points should add up
+  // to the team's score for that quarter.
+  if (team.players.some((p) => p.periodPoints?.length)) {
+    team.periodScores.forEach((score, q) => {
+      if (score === null) return;
+      const col = team.players.map((p) => p.periodPoints?.[q] ?? null);
+      const known = col.filter((v): v is number => v !== null);
+      if (!known.length) return;
+      const got = known.reduce((a, b) => a + b, 0);
+      const label = periodLabel(q);
+      // Blank cells are usually players who did not score that quarter, so only
+      // a total above the box is certain; below it is worth a look when all were read.
+      if (got > score || (got < score && known.length === col.length)) {
+        issues.push({
+          severity: 'warning',
+          path: at(`periodScores.${q}`),
+          message: `Player points in the ${label} add up to ${got}, but the ${label} box says ${score}`,
+        });
+      }
+    });
+  }
+  const runningScore = team.runningScore ?? null;
+  if (runningScore !== null && team.totalPoints !== null && runningScore !== team.totalPoints) {
+    issues.push({
+      severity: 'warning',
+      path: at('runningScore'),
+      message: `The running score stops at ${runningScore}, but the final score says ${team.totalPoints}`,
+    });
+  }
+  const halfScore = team.halfScore ?? null;
+  const [q1, q2] = team.periodScores;
+  if (halfScore !== null && q1 != null && q2 != null && q1 + q2 !== halfScore) {
+    issues.push({
+      severity: 'warning',
+      path: at('halfScore'),
+      message: `The first two quarters add up to ${q1 + q2}, but the half-time score says ${halfScore}`,
+    });
+  }
   if (team.totalPoints === null) {
     issues.push({ severity: 'warning', path: at('totalPoints'), message: 'Final score is missing' });
   }
   return issues;
 }
 
+/** "1st quarter" … "4th quarter", then "overtime" / "2nd overtime". */
+function periodLabel(q: number): string {
+  const nth = (n: number) => `${n}${n === 1 ? 'st' : n === 2 ? 'nd' : n === 3 ? 'rd' : 'th'}`;
+  if (q < 4) return `${nth(q + 1)} quarter`;
+  return q === 4 ? 'overtime' : `${nth(q - 3)} overtime`;
+}
+
+/**
+ * Whether this team's page was read (or its players entered). A scorekeeper may scan
+ * only their own team's page; the other side then holds at most a name and a score
+ * typed in, and there is nothing on it to check.
+ */
+export const wasRead = (team: TeamSheet): boolean => team.pageUri !== null || team.players.length > 0;
+
 export function validateGame(game: Game, rules = DEFAULT_RULES): Issue[] {
-  return [...validateTeam(game.home, 'home', rules), ...validateTeam(game.away, 'away', rules)];
+  return (['home', 'away'] as const).flatMap((side) => (wasRead(game[side]) ? validateTeam(game[side], side, rules) : []));
 }
 
 /** Final score for a team: the written total, else the sum of player points. */

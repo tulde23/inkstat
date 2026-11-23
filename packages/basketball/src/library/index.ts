@@ -2,7 +2,9 @@ import {
   alignTemplateParts as alignIn,
   anchorsForTemplate,
   matchLibrary as matchIn,
+  recognizeForm as recognizeIn,
   templateForPhoto as forPhotoIn,
+  type Recognition as GenericRecognition,
   type BuiltinLayout as GenericLayout,
   type LayoutMatch,
   type LibraryMatch as GenericMatch,
@@ -13,6 +15,7 @@ import {
 
 import { CATALOG, SPORT_ID, type Band, type PartId, type ScorebookTemplate } from '../scorebook';
 import championAnchors from './nfhs-champion.anchors.json';
+import gloverAnchors from './glover-short-form.anchors.json';
 import scoreRightAnchors from './scoreright.anchors.json';
 
 /**
@@ -69,6 +72,30 @@ export const LIBRARY: BuiltinLayout[] = [
     },
     variants: { fouls: 'boxes' },
   },
+  {
+    id: 'glover-short-form',
+    name: "Glover's Short Form",
+    family: 'Glover',
+    description:
+      "Glover's 35-game spiral book (BK-204), common in middle school: home team on the left page, opponent on the right, P1–P5 foul boxes, a column per quarter and a TOT PTS column, score by quarters top right.",
+    anchors: gloverAnchors,
+    enabled: ['rows', 'names', 'points', 'fouls', 'teamName', 'coach', 'date', 'location', 'quarters'],
+    // Marked on a filled 2017-edition home page (1091 x 922 photo), checked by drawing them on it.
+    // Team fouls and timeouts are left out: this edition splits both into women's and men's rows.
+    parts: {
+      rows: { x: 0.081, y: 0.287, w: 0.873, h: 0.486 },
+      names: { x: 0.104, w: 0.183 },
+      fouls: { x: 0.287, w: 0.066 },
+      points: { x: 0.827, w: 0.026 },
+      teamName: { x: 0.29, y: 0.105, w: 0.305, h: 0.03 },
+      coach: { x: 0.29, y: 0.135, w: 0.305, h: 0.022 },
+      date: { x: 0.083, y: 0.118, w: 0.205, h: 0.024 },
+      location: { x: 0.083, y: 0.157, w: 0.205, h: 0.024 },
+      quarters: { x: 0.728, y: 0.133, w: 0.208, h: 0.04 },
+    },
+    variants: { fouls: 'boxes' },
+    sheet: { teams: 'one' },
+  },
 ];
 
 /** The built-in scorebook this photo is, if any. */
@@ -86,3 +113,12 @@ export { anchorsForTemplate, type TemplateSource };
  */
 export const templateForPhoto = (template: ScorebookTemplate | null, lines: TextLine[] | null, library: BuiltinLayout[] = LIBRARY) =>
   forPhotoIn(template, lines, { id: SPORT_ID, catalog: CATALOG, library });
+
+export type Recognition = GenericRecognition<PartId>;
+
+/**
+ * Which known scoresheet a photo is: the user's and their league's templates first,
+ * then the built-in books. See recognizeForm for the four outcomes.
+ */
+export const recognizeSheet = (lines: TextLine[], templates: ScorebookTemplate[], library: BuiltinLayout[] = LIBRARY): Recognition =>
+  recognizeIn(lines, templates, { id: SPORT_ID, library });

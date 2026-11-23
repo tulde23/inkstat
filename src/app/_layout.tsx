@@ -58,6 +58,8 @@ export default function RootLayout() {
         <Stack.Screen name="scan" options={{ title: 'Scan a game' }} />
         <Stack.Screen name="models" options={{ title: 'Reading model' }} />
         <Stack.Screen name="season" options={{ title: 'Season' }} />
+        <Stack.Screen name="account" options={{ title: 'Account' }} />
+        <Stack.Screen name="join/[code]" options={{ title: 'Join a group' }} />
         <Stack.Screen name="templates" options={{ title: 'Scorebook templates' }} />
         <Stack.Screen name="template-editor" options={{ title: 'Template' }} />
         <Stack.Screen name="bench" options={{ title: 'Test bench' }} />

@@ -1,31 +1,36 @@
-import type { ExtractionProgress, NormRect } from '@inkstat/ocr-engine';
+import { builtinTemplate, type ExtractionProgress, type HomeAt, type NormRect, type SheetLayout, type TextLine } from '@inkstat/ocr-engine';
 import { router, useFocusEffect } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useSQLiteContext } from 'expo-sqlite';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Image, Platform, Pressable, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Image, Platform, Pressable, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
+import Svg, { Circle, Path } from 'react-native-svg';
 
-import { READ_IN_PROGRESS_KEY, clearSetting, getActiveTemplate, getSetting, listTemplates, saveGame, setSetting } from '@/db';
+import { READ_IN_PROGRESS_KEY, clearSetting, listTemplates, saveGame, setSetting } from '@/db';
 import {
   SCOREBOOK_PAGE_TEMPLATE,
+  LIBRARY,
+  SPORT_ID,
   applyTemplate,
   isUsable,
-  markedParts,
+  recognizeSheet,
   templateForPhoto,
   emptyTeam,
   normalizeDate,
+  today,
   readPage,
   seasonFor,
   type Game,
   type PageReading,
+  type Recognition,
   type ScorebookTemplate,
   type Side,
 } from '@inkstat/basketball';
 import { extract, getActiveModelId } from '@/engine/host';
 import { keepImage, newId } from '@/lib/files';
-import { splitPage, type HomeAt } from '@/lib/splitPage';
+import { splitPage } from '@/lib/splitPage';
 import { recognizePageText } from '../../modules/page-text';
 import { Button, Card, ProgressBar, T } from '@/ui/components';
 import { ReadingView, progressRect } from '@/ui/ReadingView';
@@ -77,41 +82,29 @@ export default function Scan() {
   const c = useColors();
   const insets = useSafeAreaInsets();
   const dialog = useDialog();
-  // A few plain questions, one screen each:
-  //   1. one page with both teams, or a page per team?
-  //   2. one page: where is the home team on it?  /  a page per team: both photos.
-  //   3. one page: the photo.
-  // A page per team needs both photos before going on; any photo can be replaced.
-  const [book, setBook] = useState<Book | null>(null);
-  const [homeAt, setHomeAt] = useState<HomeAt | null>(null);
-  const [last, setLast] = useState<{ book?: Book; homeAt?: HomeAt }>({});
-  const [pages, setPages] = useState<Record<Side, string | null>>({ home: null, away: null });
-  const [sheet, setSheet] = useState<string | null>(null);
-  const ready = book === 'separate' ? !!pages.home && !!pages.away : book === 'combined' ? !!sheet && !!homeAt : false;
+  // Recognise first: a photo, then InkStat works out which scoresheet it is.
+  //   sure    → read straight away (asking for the other team's page if the book needs it)
+  //   partly  → one tap: "Is this a <book>?"
+  //   none    → show InkStat this page once (setup), then back here
+  //   notext  → the photo is the problem: retake
+  const [stage, setStage] = useState<Stage>('start');
+  const [first, setFirst] = useState<string | null>(null);
+  const [second, setSecond] = useState<string | null>(null);
+  const [lines, setLines] = useState<TextLine[] | null>(null);
+  const [rec, setRec] = useState<Recognition | null>(null);
+  /** A scoresheet picked by hand (or confirmed), overriding recognition. */
+  const [picked, setPicked] = useState<ScorebookTemplate | null>(null);
+  const [swapped, setSwapped] = useState(false);
+  /** Set while the scorekeeper is in setup for this photo; the new template is newer than this. */
+  const [teaching, setTeaching] = useState<number | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
 
-  useEffect(() => {
-    void Promise.all([getSetting(db, BOOK_KEY), getSetting(db, HOME_AT_KEY)]).then(([b, h]) =>
-      setLast({ book: (b as Book | null) ?? undefined, homeAt: (h as HomeAt | null) ?? undefined }),
-    );
-  }, [db]);
-  const chooseBook = (b: Book) => {
-    setBook(b);
-    void setSetting(db, BOOK_KEY, b);
-  };
-  const chooseHomeAt = (h: HomeAt) => {
-    setHomeAt(h);
-    void setSetting(db, HOME_AT_KEY, h);
-  };
-  const [layout, setLayout] = useState<ScorebookTemplate | null>(null);
-  const [templateCount, setTemplateCount] = useState(0);
+  const template: ScorebookTemplate | null = picked ?? (rec && (rec.kind === 'sure' || rec.kind === 'partly') ? rec.template : null);
+  const arrangement = template ? arrange(template, rec, swapped, lines) : null;
+  // One page is enough: the other team's page is optional (a scorekeeper may only keep their own book).
+  const ready = !!template && !!first;
+  const oneTeamOnly = arrangement?.kind === 'pages' && !second;
 
-  // Re-read after returning from the template screens.
-  useFocusEffect(
-    useCallback(() => {
-      getActiveTemplate(db).then((t) => setLayout(t && isUsable(t) ? t : null));
-      listTemplates(db).then((all) => setTemplateCount(all.length));
-    }, [db]),
-  );
   const [status, setStatus] = useState<Status>(null);
   const { width: screenW, height: screenH } = useWindowDimensions();
   const elapsed = useElapsed(status?.startedAt ?? null);
@@ -119,32 +112,47 @@ export default function Scan() {
 
   useEffect(() => () => abort.current?.abort(), []);
 
-  /** Asks camera or photos, then puts the picture in its slot. */
-  const addPhoto = (slot: Side | 'sheet') => {
-    const what = slot === 'sheet' ? 'the scoresheet' : slot === 'home' ? 'the home team’s page' : 'the away team’s page';
-    const put = async (source: 'camera' | 'library') => {
-      const uri = await pick(source);
-      if (!uri) return;
-      if (slot === 'sheet') setSheet(uri);
-      else setPages((p) => ({ ...p, [slot]: uri }));
-    };
-    dialog.actions(`Add ${what}`, [
-      { label: 'Take a photo', hint: 'Flat, in good light, filling the frame', onPress: () => void put('camera') },
-      { label: 'Choose from Photos', hint: 'A picture you already took', onPress: () => void put('library') },
-    ]);
+  /** Reads the printed words on the photo and matches them against every known scoresheet. */
+  const recognise = useCallback(
+    async (uri: string) => {
+      const [text, all] = await Promise.all([recognizePageText(uri).catch(() => null), listTemplates(db)]);
+      const found = text ?? [];
+      const r = recognizeSheet(found, all.filter(isUsable));
+      const what = r.kind === 'sure' || r.kind === 'partly' ? `${r.template.name} ${r.match.inliers}/${r.match.total}${r.spread ? ` spread ${r.spread}` : ''}` : `(${r.words} words)`;
+      console.log(`[scan] recognised: ${r.kind} ${what}`);
+      // Development builds log the printed text, to build and check built-in books from real photos.
+      if (__DEV__) found.forEach((l) => console.log(`[scan-text] ${l.text} @ ${[l.rect.x, l.rect.y, l.rect.w, l.rect.h].map((n) => n.toFixed(3)).join(',')} | ${l.words.map((w) => `${w.text}:${w.rect.x.toFixed(3)},${w.rect.y.toFixed(3)},${w.rect.w.toFixed(3)},${w.rect.h.toFixed(3)}`).join(' ')}`));
+      setLines(found);
+      setRec(r);
+      return r;
+    },
+    [db],
+  );
+
+  const stageFor = (r: Recognition): Stage => (r.kind === 'sure' ? 'known' : r.kind === 'partly' ? 'unsure' : r.kind === 'none' ? 'unknown' : 'notext');
+
+  const startWith = async (uri: string) => {
+    setFirst(uri);
+    setSecond(null);
+    setPicked(null);
+    setSwapped(false);
+    setSaved(null);
+    setStage('looking');
+    setStage(stageFor(await recognise(uri)));
   };
 
-  /** The photo to read for each team. A shared page is cut into its two halves. */
-  const teamPhotos = async (): Promise<Partial<Record<Side, string>>> =>
-    book === 'combined' && sheet && homeAt
-      ? splitPage(sheet, homeAt)
-      : { ...(pages.home ? { home: pages.home } : {}), ...(pages.away ? { away: pages.away } : {}) };
-
-  const makeTemplate = async () => {
-    const photos = await teamPhotos();
-    const uri = photos.home ?? photos.away;
-    if (uri) router.push({ pathname: '/template-editor', params: { uri } });
-  };
+  // Back from setup: the page should now be recognised as the template just made.
+  useFocusEffect(
+    useCallback(() => {
+      if (teaching === null || !first) return;
+      const since = teaching;
+      void recognise(first).then((r) => {
+        setTeaching(null);
+        if (r.kind === 'sure' && r.template.createdAt >= since) setSaved(r.template.name);
+        setStage(r.kind === 'notext' ? 'unknown' : stageFor(r));
+      });
+    }, [teaching, first, recognise]),
+  );
 
   const pick = async (source: 'camera' | 'library'): Promise<string | null> => {
     const options: ImagePicker.ImagePickerOptions = {
@@ -167,7 +175,61 @@ export default function Scan() {
     return result.canceled ? null : result.assets[0].uri;
   };
 
+  const takeFirst = async (source: 'camera' | 'library') => {
+    const uri = await pick(source);
+    if (uri) await startWith(uri);
+  };
+
+  const replaceFirst = () =>
+    dialog.actions('Use a different photo', [
+      { label: 'Take a photo', hint: 'Flat, in good light, filling the frame', onPress: () => void takeFirst('camera') },
+      { label: 'Choose from Photos', hint: 'A picture you already took', onPress: () => void takeFirst('library') },
+    ]);
+
+  const addSecond = () =>
+    dialog.actions('Add the other team’s page', [
+      { label: 'Take a photo', hint: 'Flat, in good light, filling the frame', onPress: () => void pick('camera').then((u) => u && setSecond(u)) },
+      { label: 'Choose from Photos', hint: 'A picture you already took', onPress: () => void pick('library').then((u) => u && setSecond(u)) },
+    ]);
+
+  /** Every scoresheet InkStat knows, to pick by hand; or say it's new. */
+  const chooseSheet = async () => {
+    const mine = (await listTemplates(db)).filter(isUsable);
+    const mineBuiltins = new Set(mine.map((t) => t.builtinId).filter(Boolean));
+    const books = LIBRARY.filter((l) => !mineBuiltins.has(l.id)).map((l) => builtinTemplate(l, SPORT_ID));
+    dialog.actions('Which scoresheet is it?', [
+      ...mine.map((t) => ({ label: t.name, hint: 'Shown to InkStat', onPress: () => choose(t) })),
+      ...books.map((t) => ({ label: t.name, hint: 'Built into InkStat', onPress: () => choose(t) })),
+      { label: 'It’s a new scoresheet', hint: 'Show InkStat once, about two minutes', onPress: () => setStage('unknown') },
+    ]);
+  };
+  const choose = (t: ScorebookTemplate) => {
+    setPicked(t);
+    setSwapped(false);
+    setSaved(null);
+    setStage('known');
+  };
+
+  /** Into setup, on the photo (or the home team's half of it), with the page layout just answered. */
+  const teach = async (book: 'separate' | 'combined', homeAt?: HomeAt) => {
+    if (!first) return;
+    const uri = book === 'combined' && homeAt ? (await splitPage(first, homeAt)).home : first;
+    const sheet: SheetLayout = book === 'combined' ? { teams: 'both', homeAt } : { teams: 'one' };
+    setTeaching(Date.now());
+    setStage('looking');
+    router.push({ pathname: '/template-editor', params: { uri, sheet: JSON.stringify(sheet) } });
+  };
+
+  /** The photo to read for each team. */
+  const teamPhotos = async (): Promise<Partial<Record<Side, string>>> => {
+    if (!first || !arrangement) return {};
+    if (arrangement.kind === 'split') return splitPage(first, arrangement.homeAt);
+    const [home, away] = arrangement.firstIsHome ? [first, second] : [second, first];
+    return { ...(home ? { home } : {}), ...(away ? { away } : {}) };
+  };
+
   const read = async () => {
+    const sheetTemplate = template;
     abort.current = new AbortController();
     const signal = abort.current.signal;
     const id = newId();
@@ -179,7 +241,7 @@ export default function Scan() {
     await activateKeepAwakeAsync(KEEP_AWAKE_TAG).catch(() => undefined);
     try {
       const startedAt = Date.now();
-      setStatus({ text: 'Getting the pages ready…', detail: '', fraction: 0, startedAt, uri: sheet ?? pages.home ?? undefined, rect: null });
+      setStatus({ text: 'Getting the pages ready…', detail: '', fraction: 0, startedAt, uri: first ?? undefined, rect: null });
       const photos = await teamPhotos();
       const modelId = await getActiveModelId(db);
       const sides = (['home', 'away'] as const).filter((s) => photos[s]);
@@ -187,10 +249,9 @@ export default function Scan() {
 
       for (const [i, side] of sides.entries()) {
         const uri = keepImage(photos[side]!, id, side);
-        // Line the template up with this photo by its printed labels (or recognise a
-        // built-in book when there is no template); otherwise use the boxes as saved.
+        // Line the recognised scoresheet's boxes up with this photo by its printed labels.
         const lines = await recognizePageText(uri);
-        const chosen = templateForPhoto(layout, lines);
+        const chosen = templateForPhoto(sheetTemplate, lines);
         console.log(`[scan] ${side} template: ${chosen.source}${chosen.detail ? ` (${chosen.detail})` : ''}`);
         const template = chosen.template ? applyTemplate(SCOREBOOK_PAGE_TEMPLATE, chosen.template) : SCOREBOOK_PAGE_TEMPLATE;
         const run = await extract(modelId, uri, template, {
@@ -231,7 +292,8 @@ export default function Scan() {
       // Each page names its opponent; use that when the other page didn't name its own team.
       home.name ??= readings.away?.opponent ?? null;
       away.name ??= readings.home?.opponent ?? null;
-      const date = normalizeDate(readings.home?.date ?? readings.away?.date ?? null);
+      // No date read off the sheet: it was almost always played today. The date stays editable on the game.
+      const date = normalizeDate(readings.home?.date ?? readings.away?.date ?? null) ?? today();
       const now = Date.now();
       const game: Game = {
         id,
@@ -283,158 +345,255 @@ export default function Scan() {
     );
   }
 
-  const step = book === null ? 'layout' : book === 'combined' && !homeAt ? 'where' : 'photos';
-  const stepNo = step === 'layout' ? 1 : step === 'where' || book === 'separate' ? 2 : 3;
-
-  const missing =
-    book === 'combined'
-      ? 'Add a photo of the scoresheet to continue.'
-      : !pages.home && !pages.away
-        ? 'Add both teams’ pages to continue.'
-        : !pages.home
-          ? 'Add the home team’s page to continue.'
-          : 'Add the away team’s page to continue.';
+  const isBuiltin = !!template && template.id.startsWith('builtin-');
+  const homeAway = arrangement?.kind === 'pages' ? (arrangement.firstIsHome ? [first, second] : [second, first]) : [];
 
   return (
     <View style={[base.screen, { backgroundColor: c.bg }]}>
-      <ScrollView contentContainerStyle={[base.content, { paddingBottom: step === 'photos' ? 140 : space.xl }]}>
-        <View style={[base.row, { justifyContent: 'space-between' }]}>
-          <View style={styles.progress}>
-            {[1, 2, 3].map((n) => (
-              <View key={n} style={[styles.progressBar, { backgroundColor: n <= stepNo ? c.accent : c.border }]} />
-            ))}
-          </View>
-          <T muted style={styles.stepLabel}>{`STEP ${stepNo} OF 3`}</T>
-        </View>
-
-        {/* Answers so far, each with Change */}
-        {book && <Answer text={BOOK_LABEL[book]} onChange={() => { setBook(null); setHomeAt(null); }} />}
-        {book === 'combined' && homeAt && <Answer text={`Home team on the ${homeAt}`} onChange={() => setHomeAt(null)} />}
-
-        {step === 'layout' && (
+      <ScrollView contentContainerStyle={[base.content, { paddingBottom: 190 }]}>
+        {stage === 'start' && (
           <>
-            <T style={styles.question}>How is this game’s scoresheet laid out?</T>
-            <T muted style={styles.lead}>Look at the paper. This tells InkStat how many photos to ask for.</T>
-            {(['separate', 'combined'] as const).map((b) => (
-              <Choice
-                key={b}
-                title={BOOK_LABEL[b]}
-                body={b === 'separate' ? 'You’ll add two photos.' : 'You’ll add one photo.'}
-                tag={last.book === b ? 'Same as last time' : undefined}
-                picture={<Diagram kind={b} />}
-                onPress={() => chooseBook(b)}
-              />
-            ))}
-            <View style={[styles.tip, { backgroundColor: c.sunken }]}>
-              <T muted style={{ fontSize: 14 }}>Not sure? Most high school scorebooks give each team its own page, side by side.</T>
+            <T style={styles.question}>Take a photo of the scoresheet</T>
+            <T muted style={styles.lead}>InkStat works out which scoresheet it is. If each team has its own sheet, it asks for the other one next.</T>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Take a photo"
+              onPress={() => void takeFirst('camera')}
+              style={({ pressed }) => [styles.bigSlot, { borderColor: c.accent, backgroundColor: pressed ? c.sunken : 'transparent' }]}>
+              <CameraIcon color={c.accent} />
+              <T style={{ color: c.accent, fontFamily: fonts.bodyBold, fontSize: 18 }}>Take a photo</T>
+              <T muted style={{ fontSize: 13 }}>Flat, good light, the whole page in</T>
+            </Pressable>
+            <View style={{ gap: space.sm }}>
+              <T muted style={{ fontSize: 14 }}>{'✓  A book open to both teams? One photo of both pages is fine.'}</T>
+              <T muted style={{ fontSize: 14 }}>{'✓  Photos stay on this phone.'}</T>
             </View>
           </>
         )}
 
-        {step === 'where' && (
+        {stage === 'looking' && (
+          <>
+            {first && <Image source={{ uri: first }} style={[styles.photo, { backgroundColor: c.sunken }]} resizeMode="contain" />}
+            <View style={{ alignItems: 'center', gap: space.sm, marginTop: space.md }}>
+              <ActivityIndicator color={c.accent} size="large" />
+              <T style={{ fontSize: 18, fontFamily: fonts.bodySemiBold }}>Finding your scoresheet…</T>
+              <T muted style={{ fontSize: 14 }}>Reading the printed labels, on this phone</T>
+            </View>
+          </>
+        )}
+
+        {stage === 'known' && template && arrangement && (
+          <>
+            <View style={[styles.banner, { backgroundColor: c.okBg, borderColor: c.ok }]}>
+              <T style={[styles.overline, { color: c.ok }]}>{saved ? '✓ Saved' : picked ? '✓ Chosen' : '✓ Recognised'}</T>
+              <T style={{ fontSize: 19, fontFamily: fonts.bodyBold }}>{template.name}</T>
+              <T muted style={{ fontSize: 13.5 }}>
+                {saved ? 'Next time InkStat recognises it and reads it straight away.' : isBuiltin ? 'Built into InkStat' : 'A scoresheet InkStat was shown'}
+              </T>
+            </View>
+
+            {arrangement.kind === 'split' ? (
+              <>
+                <PhotoSlot label="Both teams" wide uri={first} onPress={replaceFirst} replaceLabel="Use a different photo" />
+                <View style={[base.row, { gap: space.sm }]}>
+                  <T muted style={{ flex: 1, fontSize: 14 }}>{`One photo, both teams: home on the ${arrangement.homeAt}.`}</T>
+                  <LinkButton label="⇄ Swap" onPress={() => setSwapped((v) => !v)} />
+                </View>
+              </>
+            ) : (
+              <>
+                {!second && <T style={styles.question}>Add the other team’s page?</T>}
+                {!second && <T muted style={styles.lead}>Optional. Add it to read both teams, or read just this one.</T>}
+                <View style={[base.row, { alignItems: 'flex-start', gap: space.md }]}>
+                  {homeAway.map((uri, k) => (
+                    <PhotoSlot
+                      key={k}
+                      label={k === 0 ? 'Home team' : 'Away team'}
+                      uri={uri}
+                      onPress={uri !== null && uri === first ? replaceFirst : addSecond}
+                    />
+                  ))}
+                </View>
+                <View style={[base.row, { gap: space.sm }]}>
+                  <T muted style={{ flex: 1, fontSize: 14 }}>
+                    {arrangement.guessed ? 'The first page’s heading says it’s the visiting team’s.' : 'The first page went on the home side.'}
+                  </T>
+                  <LinkButton label="⇄ Swap" onPress={() => setSwapped((v) => !v)} />
+                </View>
+              </>
+            )}
+          </>
+        )}
+
+        {stage === 'unsure' && rec?.kind === 'partly' && (
+          <>
+            <T style={styles.question}>{`Is this a ${rec.template.name}?`}</T>
+            <T muted style={styles.lead}>Some of the printed labels match, but not all. It could be an older printing or a similar book.</T>
+            <View style={[base.row, { gap: space.md, alignItems: 'flex-start' }]}>
+              <View style={{ flex: 1, gap: space.xs }}>
+                <T style={{ fontFamily: fonts.bodyBold, fontSize: 13 }}>Your photo</T>
+                {first && <Image source={{ uri: first }} style={[styles.half, { backgroundColor: c.sunken }]} resizeMode="contain" />}
+              </View>
+              <View style={{ flex: 1, gap: space.xs }}>
+                <T style={{ fontFamily: fonts.bodyBold, fontSize: 13 }}>{rec.template.name}</T>
+                {rec.template.photoUri ? (
+                  <Image source={{ uri: rec.template.photoUri }} style={[styles.half, { backgroundColor: c.sunken }]} resizeMode="contain" />
+                ) : (
+                  <View style={[styles.half, { backgroundColor: c.sunken, padding: space.md, justifyContent: 'center' }]}>
+                    <T muted style={{ fontSize: 13 }}>{LIBRARY.find((l) => l.id === rec.template.builtinId)?.description ?? ''}</T>
+                  </View>
+                )}
+              </View>
+            </View>
+            <T muted style={{ fontSize: 13.5 }}>Look at the headings and the boxes at the top. If they’re laid out the same way, it’s the same book.</T>
+          </>
+        )}
+
+        {stage === 'unknown' && (
+          <>
+            {first && <Image source={{ uri: first }} style={[styles.photoSmall, { backgroundColor: c.sunken }]} resizeMode="contain" />}
+            <T style={styles.question}>InkStat hasn’t seen this scoresheet yet</T>
+            <T muted style={styles.lead}>Show it where things are on the page, once. It takes about two minutes, and then InkStat knows this scoresheet every time.</T>
+            <Card>
+              <T style={{ fontFamily: fonts.bodyBold, fontSize: 14 }}>You won’t start from nothing</T>
+              <T muted style={{ fontSize: 13.5 }}>InkStat places the boxes it can find from the printed headings. You check them and fix any that are off.</T>
+            </Card>
+            <Card>
+              <T style={{ fontFamily: fonts.bodyBold, fontSize: 14 }}>Your league can use it too</T>
+              <T muted style={{ fontSize: 13.5 }}>Only the printed layout is ever shared, never names, scores or photos.</T>
+            </Card>
+          </>
+        )}
+
+        {stage === 'layout' && (
+          <>
+            <T style={styles.question}>How is this scoresheet laid out?</T>
+            <T muted style={styles.lead}>InkStat remembers this with the scoresheet, so you only answer once.</T>
+            <Choice
+              title={BOOK_LABEL.separate}
+              body="One team per sheet or page. You’ll add the other team’s page when scanning."
+              picture={<Diagram kind="separate" />}
+              onPress={() => void teach('separate')}
+            />
+            <Choice title={BOOK_LABEL.combined} body="Or a book open to both teams’ pages, in one photo." picture={<Diagram kind="combined" />} onPress={() => setStage('where')} />
+          </>
+        )}
+
+        {stage === 'where' && (
           <>
             <T style={styles.question}>Where is the home team on the page?</T>
             <T muted style={styles.lead}>InkStat cuts the photo in two and reads each team’s half.</T>
             <View style={styles.grid}>
               {(['top', 'bottom', 'left', 'right'] as const).map((h) => (
-                <Choice
-                  key={h}
-                  compact
-                  title={`${h[0].toUpperCase()}${h.slice(1)}`}
-                  tag={last.homeAt === h ? 'Last time' : undefined}
-                  picture={<Diagram kind={h} />}
-                  onPress={() => chooseHomeAt(h)}
-                />
+                <Choice key={h} compact title={`${h[0].toUpperCase()}${h.slice(1)}`} picture={<Diagram kind={h} />} onPress={() => void teach('combined', h)} />
               ))}
             </View>
             <T muted style={base.small}>Home is usually marked HOME or H next to the team name.</T>
           </>
         )}
 
-        {step === 'photos' && (
+        {stage === 'notext' && (
           <>
-            <T style={styles.question}>{book === 'separate' ? 'Add both teams’ pages' : 'Add the scoresheet'}</T>
-            <T muted style={styles.lead}>
-              {book === 'separate'
-                ? 'Lay each page flat in good light. Get the whole page in, with the writing sharp.'
-                : 'Lay the page flat in good light. Get both teams in, with the writing sharp.'}
-            </T>
-            {book === 'separate' ? (
-              <View style={[base.row, { alignItems: 'flex-start', gap: space.md }]}>
-                {(['home', 'away'] as const).map((side) => (
-                  <PhotoSlot key={side} label={side === 'home' ? 'Home team' : 'Away team'} uri={pages[side]} onPress={() => addPhoto(side)} />
-                ))}
-              </View>
-            ) : (
-              <PhotoSlot label="Both teams" wide uri={sheet} onPress={() => addPhoto('sheet')} />
-            )}
-
-            {/* The template: what makes reading accurate. */}
-            <Card>
-              <View style={[base.row, { justifyContent: 'space-between' }]}>
-                <View style={{ flex: 1 }}>
-                  <T style={[styles.overline, { color: layout ? c.ok : c.muted }]}>
-                    {layout ? 'Template · ready' : templateCount ? 'Template · not finished' : 'Template · none yet'}
-                  </T>
-                  <T style={{ fontFamily: fonts.bodySemiBold, fontSize: 15 }}>
-                    {layout ? layout.name : 'InkStat will guess where things are'}
-                  </T>
-                </View>
-                {layout && (
-                  <Pressable onPress={() => router.push('/templates')} accessibilityRole="button" hitSlop={8} style={{ minHeight: 44, justifyContent: 'center' }}>
-                    <T style={{ color: c.accent, fontFamily: fonts.bodySemiBold }}>Change</T>
-                  </Pressable>
-                )}
-              </View>
-              {layout ? (
-                <T muted style={base.small}>{`Reads the ${markedParts(layout).length} parts you showed it on this kind of scoresheet.`}</T>
-              ) : (
-                <>
-                  <T muted style={base.small}>
-                    {templateCount
-                      ? 'Your template needs the player rows, names and points shown before it can help.'
-                      : 'A template shows InkStat where things are on your scoresheet. Make one once per kind of book, about two minutes, and every scan reads much better.'}
-                  </T>
-                  {templateCount > 0 ? (
-                    <Button title="Finish my template" kind="secondary" onPress={() => router.push('/templates')} />
-                  ) : (
-                    <Button title="Make a template from this photo" kind="secondary" disabled={!(sheet || pages.home || pages.away)} onPress={() => void makeTemplate()} />
-                  )}
-                </>
-              )}
-            </Card>
+            {first && <Image source={{ uri: first }} style={[styles.photoSmall, { backgroundColor: c.sunken }]} resizeMode="contain" />}
+            <T style={styles.question}>InkStat couldn’t read this photo</T>
+            <T muted style={styles.lead}>It found almost no printed words, so it can’t tell which scoresheet this is. That’s usually the photo, not the page.</T>
+            <View style={{ gap: space.sm }}>
+              <T style={{ fontSize: 15 }}>{'💡  More light, and no shadow from your phone'}</T>
+              <T style={{ fontSize: 15 }}>{'📐  Hold the phone flat above the page'}</T>
+              <T style={{ fontSize: 15 }}>{'🔍  Tap the screen to focus before taking it'}</T>
+            </View>
           </>
         )}
       </ScrollView>
 
-      {step === 'photos' && (
+      {stage !== 'looking' && (
         <View style={[styles.footer, { backgroundColor: c.bg, borderTopColor: c.border, paddingBottom: space.md + insets.bottom }]}>
-          <Button title="Continue: read the scoresheet" size="lg" disabled={!ready} onPress={read} />
-          {!ready && <T muted style={[base.small, { textAlign: 'center' }]}>{missing}</T>}
+          {stage === 'start' && <Button title="Choose from Photos" kind="secondary" size="lg" onPress={() => void takeFirst('library')} />}
+          {stage === 'known' && (
+            <>
+              <Button title={oneTeamOnly ? 'Read this team’s page' : 'Read the scoresheet'} size="lg" disabled={!ready} onPress={read} />
+              {!saved && <LinkButton center label="Not this scoresheet?" onPress={() => void chooseSheet()} />}
+            </>
+          )}
+          {stage === 'unsure' && rec?.kind === 'partly' && (
+            <>
+              <Button title="Yes, it’s this one" size="lg" onPress={() => choose(rec.template)} />
+              <Button title="No, it’s different" kind="secondary" onPress={() => setStage('unknown')} />
+              <T muted style={[base.small, { textAlign: 'center' }]}>Not sure? Choose Yes. You can check every number after the read.</T>
+            </>
+          )}
+          {stage === 'unknown' && (
+            <>
+              <Button title="Show InkStat this page" size="lg" onPress={() => setStage('layout')} />
+              <LinkButton center label="It’s a scoresheet InkStat knows: pick it" onPress={() => void chooseSheet()} />
+            </>
+          )}
+          {(stage === 'layout' || stage === 'where') && (
+            <LinkButton center label="Back" onPress={() => setStage(stage === 'where' ? 'layout' : 'unknown')} />
+          )}
+          {stage === 'notext' && (
+            <>
+              <Button title="Take it again" size="lg" onPress={() => void takeFirst('camera')} />
+              <LinkButton center label="Choose a different photo" onPress={() => void takeFirst('library')} />
+            </>
+          )}
         </View>
       )}
     </View>
   );
 }
 
-type Book = 'separate' | 'combined';
-const BOOK_KEY = 'scan.book';
-const HOME_AT_KEY = 'scan.homeAt';
-const BOOK_LABEL: Record<Book, string> = {
+type Stage = 'start' | 'looking' | 'known' | 'unsure' | 'unknown' | 'layout' | 'where' | 'notext';
+
+const BOOK_LABEL = {
   separate: 'Each team has its own page',
   combined: 'Both teams on one page',
-};
+} as const;
 
-function Answer({ text, onChange }: { text: string; onChange: () => void }) {
+type Arrangement = { kind: 'split'; homeAt: HomeAt } | { kind: 'pages'; firstIsHome: boolean; guessed: boolean };
+
+const FLIP: Record<HomeAt, HomeAt> = { top: 'bottom', bottom: 'top', left: 'right', right: 'left' };
+
+/**
+ * How this game's photos map to teams. A page with both teams is cut in two at the
+ * template's home side; a book spread (one team per page, both pages in the photo)
+ * is cut left and right, home on the left as books print it; otherwise each team
+ * has its own photo, and the first page's heading may say it's the visitors'.
+ */
+function arrange(t: ScorebookTemplate, rec: Recognition | null, swapped: boolean, lines: TextLine[] | null): Arrangement {
+  const spread = rec && (rec.kind === 'sure' || rec.kind === 'partly') && rec.template.id === t.id ? rec.spread : null;
+  if (t.sheet?.teams === 'both') {
+    const at = t.sheet.homeAt ?? 'top';
+    return { kind: 'split', homeAt: swapped ? FLIP[at] : at };
+  }
+  if (spread) return { kind: 'split', homeAt: swapped ? 'right' : 'left' };
+  const away = headingSaysAway(lines);
+  return { kind: 'pages', firstIsHome: away === swapped, guessed: away };
+}
+
+/** The top of the page names it the visiting team's (and not home's). */
+function headingSaysAway(lines: TextLine[] | null): boolean {
+  if (!lines) return false;
+  const top = lines.filter((l) => l.rect.y < 0.3).map((l) => l.text.toLowerCase());
+  const has = (re: RegExp) => top.some((t) => re.test(t));
+  return has(/\b(visitors?|visiting|guests?|opponents?|away)\b/) && !has(/\bhome\b/);
+}
+
+function LinkButton({ label, onPress, center }: { label: string; onPress: () => void; center?: boolean }) {
   const c = useColors();
   return (
-    <View style={[base.row, { minHeight: 32 }]}>
-      <T style={{ color: c.ok, fontFamily: fonts.bodyBold }}>✓</T>
-      <T muted style={{ flex: 1, fontSize: 14 }}>{text}</T>
-      <Pressable onPress={onChange} accessibilityRole="button" accessibilityLabel={`Change: ${text}`} hitSlop={10} style={{ minHeight: 44, justifyContent: 'center' }}>
-        <T style={{ color: c.accent, fontFamily: fonts.bodySemiBold }}>Change</T>
-      </Pressable>
-    </View>
+    <Pressable onPress={onPress} accessibilityRole="button" hitSlop={8} style={{ minHeight: 44, justifyContent: 'center', alignSelf: center ? 'center' : undefined }}>
+      <T style={{ color: c.accent, fontFamily: fonts.bodySemiBold, fontSize: 15 }}>{label}</T>
+    </Pressable>
+  );
+}
+
+function CameraIcon({ color }: { color: string }) {
+  return (
+    <Svg width={44} height={44} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <Path d="M4 8h3l2-2.5h6L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z" />
+      <Circle cx={12} cy={13} r={3.5} />
+    </Svg>
   );
 }
 
@@ -475,7 +634,7 @@ function Choice({
 }
 
 /** A small drawing of the page(s): ruled lines, with the home team's part highlighted. */
-function Diagram({ kind }: { kind: Book | HomeAt }) {
+function Diagram({ kind }: { kind: 'separate' | 'combined' | HomeAt }) {
   const c = useColors();
   const narrow = kind === 'left' || kind === 'right';
   const part = (home: boolean) => (
@@ -514,7 +673,7 @@ function Diagram({ kind }: { kind: Book | HomeAt }) {
 }
 
 /** An empty dashed slot to add a photo, or the photo with Replace. */
-function PhotoSlot({ label, uri, wide, onPress }: { label: string; uri: string | null; wide?: boolean; onPress: () => void }) {
+function PhotoSlot({ label, uri, wide, onPress, replaceLabel = 'Replace' }: { label: string; uri: string | null; wide?: boolean; onPress: () => void; replaceLabel?: string }) {
   const c = useColors();
   return (
     <View style={{ flex: 1, gap: space.xs }}>
@@ -525,7 +684,7 @@ function PhotoSlot({ label, uri, wide, onPress }: { label: string; uri: string |
       {uri ? (
         <>
           <Image source={{ uri }} style={[styles.slot, wide && styles.slotWide, { backgroundColor: c.sunken }]} resizeMode="contain" />
-          <Button title="Replace" kind="secondary" onPress={onPress} />
+          <Button title={replaceLabel} kind="secondary" onPress={onPress} />
         </>
       ) : (
         <Pressable
@@ -564,5 +723,10 @@ const styles = StyleSheet.create({
   slot: { width: '100%', height: 210, borderRadius: 8 },
   slotWide: { height: 260 },
   empty: { borderWidth: 2, borderStyle: 'dashed', alignItems: 'center', justifyContent: 'center', gap: 2 },
+  bigSlot: { height: 280, borderRadius: 12, borderWidth: 2, borderStyle: 'dashed', alignItems: 'center', justifyContent: 'center', gap: space.sm },
+  photo: { width: '100%', height: 380, borderRadius: 8 },
+  photoSmall: { width: '100%', height: 220, borderRadius: 8 },
+  half: { width: '100%', height: 230, borderRadius: 8 },
+  banner: { borderWidth: 1, borderRadius: 8, padding: space.md, gap: 4 },
   footer: { position: 'absolute', left: 0, right: 0, bottom: 0, padding: space.lg, gap: space.xs, borderTopWidth: 1 },
 });

@@ -19,6 +19,8 @@ import { fonts, space } from './theme';
 export interface Photo {
   uri: string;
   label: string;
+  /** The whole page photo, as opposed to a crop of it. */
+  page?: boolean;
 }
 
 const MAX_SCALE = 6;
@@ -209,6 +211,8 @@ export function PhotoViewer({
     }
   }
 
+  const page = photos.findIndex((p) => p.page);
+
   const go = (i: number) => {
     const next = clamp(i, 0, photos.length - 1);
     list.current?.scrollToIndex({ index: next, animated: true });
@@ -253,6 +257,12 @@ export function PhotoViewer({
               <T style={styles.light}>{photos[at]?.label ?? ''}</T>
               <T style={[styles.light, styles.dim]}>{`${at + 1} of ${photos.length}`}</T>
             </View>
+            {/* A crop can be too small to settle a value: one tap to the whole page photo. */}
+            {page >= 0 && at !== page && (
+              <Pressable onPress={() => go(page)} style={styles.pill} accessibilityRole="button" accessibilityLabel="See the whole page">
+                <T style={[styles.light, { fontFamily: fonts.bodySemiBold, fontSize: 14 }]}>Whole page</T>
+              </Pressable>
+            )}
             <Pressable onPress={onClose} style={styles.button} accessibilityRole="button" accessibilityLabel="Close" hitSlop={8}>
               <T style={styles.glyph}>✕</T>
             </Pressable>
@@ -310,5 +320,13 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.15)',
   },
   off: { opacity: 0.3 },
+  pill: {
+    minHeight: 44,
+    paddingHorizontal: 14,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
   glyph: { color: '#FFFFFF', fontSize: 24, lineHeight: 28, fontFamily: fonts.bodySemiBold },
 });

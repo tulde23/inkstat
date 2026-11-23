@@ -31,12 +31,12 @@ const sumPts = (ps: PlayerLine[]) => ps.reduce((n, p) => n + (p.points ?? 0), 0)
 type Editing = { kind: 'row'; index: number } | { kind: 'team' } | null;
 
 export default function BoxScore() {
-  const { id, side: start } = useLocalSearchParams<{ id: string; side?: Side }>();
+  const { id, side: start, edit } = useLocalSearchParams<{ id: string; side?: Side; edit?: 'team' }>();
   const c = useColors();
   const dialog = useDialog();
   const { game, update } = useGame(id);
   const [side, setSide] = useState<Side>(start === 'away' ? 'away' : 'home');
-  const [editing, setEditing] = useState<Editing>(null);
+  const [editing, setEditing] = useState<Editing>(edit === 'team' ? { kind: 'team' } : null);
   const [viewing, setViewing] = useState<number | null>(null);
   const issues = useMemo(() => (game ? validateGame(game) : []), [game]);
 

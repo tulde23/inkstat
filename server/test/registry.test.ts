@@ -84,6 +84,114 @@ describe('results', () => {
     assert.equal((await json(await s.call('GET', `/v1/results/${third.result.id}`, undefined, dana))).result.status, 'confirmed');
   });
 
+  /** Two teams and four scorekeepers; Stars' and Comets' scorekeepers each read only their own book. */
+  async function oneSided() {
+    const s = await makeServer();
+    const [dana, miles, priya, eve] = await Promise.all(['dana', 'miles', 'priya', 'eve'].map(async (n) => (await s.signIn(n)).accessToken));
+    const stars = (await json(await s.call('POST', '/v1/teams', team('Henley Stars'), dana))).team.id;
+    const comets = (await json(await s.call('POST', '/v1/teams', team('Comets', 'Dalton'), dana))).team.id;
+    const report = async (by: string, body: Record<string, unknown>) => {
+      const res = await s.call('POST', '/v1/results', { sport: 'basketball', ...body }, by);
+      assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+      return (await json(res)).result;
+    };
+    return { s, dana, miles, priya, eve, stars, comets, report };
+  }
+
+  it('combines one-sided reports from both scorekeepers, flipped and a day apart', async () => {
+    const { s, dana, miles, priya, eve, stars, comets, report } = await oneSided();
+    // Stars' scorekeeper: Stars at home on Dec 1, their own score only.
+    const first = await report(dana, { date: '2026-12-01', homeId: stars, awayId: comets, homeScore: 50, awayScore: null, periods: { home: [12, 14, 10, 14] } });
+    assert.equal(first.status, 'partial');
+    assert.equal(first.home.state, 'known');
+    assert.equal(first.away.state, 'unknown');
+    assert.equal(first.away.score, null);
+    // Comets' scorekeeper has Comets as home, and the next day's date.
+    const second = await report(miles, { date: '2026-12-02', homeId: comets, awayId: stars, homeScore: 46, periods: { home: [10, 12, 12, 12] } });
+    assert.equal(second.id, first.id, 'the same game');
+    assert.equal(second.date, '2026-12-01');
+    assert.deepEqual(
+      [second.home.id, second.home.score, second.away.id, second.away.score, second.status, second.reports],
+      [stars, 50, comets, 46, 'reported', 2],
+    );
+    assert.deepEqual([second.home.reports, second.away.reports], [1, 1]);
+
+    const third = await report(priya, { date: '2026-12-01', homeId: stars, awayId: comets, homeScore: 50, awayScore: 46 });
+    assert.equal(third.id, first.id);
+    assert.equal(third.status, 'confirmed');
+    assert.deepEqual([third.home.reports, third.away.reports], [2, 2]);
+
+    // A conflicting report a day off is another game (nothing a day apart may conflict)...
+    const elsewhere = await report(eve, { date: '2026-12-02', homeId: comets, awayId: stars, homeScore: 48, awayScore: 50 });
+    assert.notEqual(elsewhere.id, first.id);
+    await s.call('DELETE', `/v1/results/${elsewhere.id}`, undefined, eve);
+    // ...but on the game's own date it joins and disputes it.
+    const odd = await report(eve, { date: '2026-12-01', homeId: comets, awayId: stars, homeScore: 48, awayScore: 50 });
+    assert.equal(odd.id, first.id);
+    assert.equal(odd.status, 'disputed');
+    assert.equal(odd.away.state, 'conflicting');
+    assert.equal(odd.home.state, 'known');
+
+    // Retracting the odd one out restores agreement; retracting everyone removes the game.
+    assert.equal((await s.call('DELETE', `/v1/results/${first.id}`, undefined, eve)).status, 204);
+    assert.equal((await json(await s.call('GET', `/v1/results/${first.id}`, undefined, dana))).result.status, 'confirmed');
+    for (const t of [dana, miles, priya]) await s.call('DELETE', `/v1/results/${first.id}`, undefined, t);
+    assert.equal((await s.call('GET', `/v1/results/${first.id}`, undefined, dana)).status, 404);
+  });
+
+  it('refuses a report with no score at all', async () => {
+    const { dana, stars, comets, s } = await oneSided();
+    const res = await s.call('POST', '/v1/results', { sport: 'basketball', date: '2026-12-01', homeId: stars, awayId: comets, homeScore: null }, dana);
+    assert.equal(res.status, 400);
+  });
+
+  it('keeps a doubleheader as two games', async () => {
+    const { s, dana, miles, priya, stars, comets, report } = await oneSided();
+    const date = '2026-12-05';
+    const g1 = await report(dana, { date, homeId: stars, awayId: comets, homeScore: 50, awayScore: 46, sourceId: 'game0001' });
+    assert.equal((await report(miles, { date, homeId: stars, awayId: comets, awayScore: 46, sourceId: 'scan0001' })).id, g1.id);
+    // Game two: the same scorekeepers, the same day, each a new scanned game.
+    const g2 = await report(dana, { date, homeId: stars, awayId: comets, homeScore: 60, awayScore: 55, sourceId: 'game0002' });
+    assert.notEqual(g2.id, g1.id);
+    const m2 = await report(miles, { date, homeId: stars, awayId: comets, awayScore: 55, sourceId: 'scan0002' });
+    assert.equal(m2.id, g2.id);
+    // A third scorekeeper's game-two score joins the game it agrees with, not game one.
+    const p2 = await report(priya, { date, homeId: comets, awayId: stars, homeScore: 55, awayScore: 60 });
+    assert.equal(p2.id, g2.id);
+    assert.equal(p2.status, 'confirmed');
+    // Game one is untouched.
+    const one = (await json(await s.call('GET', `/v1/results/${g1.id}`, undefined, dana))).result;
+    assert.deepEqual([one.home.score, one.away.score, one.status, one.reports], [50, 46, 'confirmed', 2]);
+  });
+
+  it('replaces a re-report instead of counting it twice', async () => {
+    const { dana, miles, stars, comets, report } = await oneSided();
+    const first = await report(dana, { date: '2026-12-01', homeId: stars, awayId: comets, homeScore: 50, awayScore: 64 });
+    // A corrected read: the same scorekeeper, the same game, flipped.
+    const again = await report(dana, { date: '2026-12-01', homeId: comets, awayId: stars, homeScore: 46, awayScore: 50 });
+    assert.equal(again.id, first.id);
+    assert.equal(again.reports, 1);
+    assert.deepEqual([again.home.score, again.away.score, again.status], [50, 46, 'reported']);
+    // With the app's game id, a re-report finds the game even on a corrected date.
+    const scanned = await report(miles, { date: '2026-12-10', homeId: stars, awayId: comets, awayScore: 40, sourceId: 'scan0009' });
+    const moved = await report(miles, { date: '2026-12-11', homeId: stars, awayId: comets, awayScore: 41, sourceId: 'scan0009' });
+    assert.equal(moved.id, scanned.id);
+    assert.equal(moved.reports, 1);
+    assert.equal(moved.away.score, 41);
+  });
+
+  it('leaves partial games out of standings', async () => {
+    const { s, dana, miles, stars, comets, report } = await oneSided();
+    await report(dana, { date: '2026-12-01', homeId: stars, awayId: comets, homeScore: 50 });
+    let res = await json(await s.call('GET', `/v1/teams/${stars}/results?season=2026-27`, undefined, dana));
+    assert.equal(res.results.length, 1, 'listed for signed-in scorekeepers');
+    assert.equal(res.results[0].status, 'partial');
+    assert.deepEqual(res.record, { w: 0, l: 0, pf: 0, pa: 0, disputed: 0 });
+    await report(miles, { date: '2026-12-01', homeId: stars, awayId: comets, awayScore: 46 });
+    res = await json(await s.call('GET', `/v1/teams/${stars}/results?season=2026-27`, undefined, dana));
+    assert.deepEqual(res.record, { w: 1, l: 0, pf: 50, pa: 46, disputed: 0 });
+  });
+
   it('refuses a team playing itself', async () => {
     const s = await makeServer();
     const t = (await s.signIn('dana')).accessToken;

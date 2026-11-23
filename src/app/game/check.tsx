@@ -39,12 +39,17 @@ const toInt = (s: string): number | null => {
 /** What the user is editing for one issue: one number, the quarters, or a number+name. */
 type Draft = { value: string; quarters: string[]; number: string; name: string };
 
+/** Team numbers a check can correct one at a time (quarters are edited together). */
+const TEAM_NUMBERS = ['totalPoints', 'runningScore', 'halfScore'] as const;
+type TeamNumber = (typeof TEAM_NUMBERS)[number];
+const isTeamNumber = (f: string): f is TeamNumber => (TEAM_NUMBERS as readonly string[]).includes(f);
+
 function draftFor(g: Game, i: Issue): Draft {
   const p = parseIssuePath(i.path);
   const team = g[p.side];
   const row = p.kind === 'player' ? team.players[p.row] : null;
   const v =
-    p.kind === 'player' ? row?.[p.field as keyof PlayerLine] : p.field === 'totalPoints' ? team.totalPoints : null;
+    p.kind === 'player' ? row?.[p.field as keyof PlayerLine] : isTeamNumber(p.field) ? team[p.field] : null;
   return {
     value: typeof v === 'number' ? String(v) : '',
     quarters: team.periodScores.map((s) => (s === null ? '' : String(s))),
@@ -62,7 +67,8 @@ function apply(g: Game, i: Issue, d: Draft): Game {
     return { ...g, [p.side]: { ...team, players: team.players.map((r, k) => (k === p.row ? { ...r, ...patch } : r)) } };
   }
   if (p.field === 'periodScores') return { ...g, [p.side]: { ...team, periodScores: d.quarters.map(toInt) } };
-  return { ...g, [p.side]: { ...team, totalPoints: toInt(d.value) } };
+  if (isTeamNumber(p.field)) return { ...g, [p.side]: { ...team, [p.field]: toInt(d.value) } };
+  return g;
 }
 
 export default function CheckFlow() {
@@ -157,7 +163,18 @@ export default function CheckFlow() {
                 </Pressable>
               ))}
             </ScrollView>
-            <T muted style={{ fontSize: 12.5 }}>Tap to zoom.</T>
+            <View style={styles.photoBar}>
+              <T muted style={{ fontSize: 12.5, flex: 1 }}>Tap to zoom.</T>
+              {team.pageUri && !(shown.length === 1 && shown[0] === 0) && (
+                <Pressable
+                  onPress={() => setViewing(0)}
+                  accessibilityRole="button"
+                  accessibilityHint="Opens the whole page photo; pinch to zoom"
+                  style={styles.wholePage}>
+                  <T style={{ color: c.accent, fontFamily: fonts.bodySemiBold, fontSize: 14 }}>See the whole page</T>
+                </Pressable>
+              )}
+            </View>
           </View>
         )}
 
@@ -251,6 +268,8 @@ const styles = StyleSheet.create({
   seg: { flex: 1, height: 5, borderRadius: 3 },
   caption: { fontSize: 12.5, fontFamily: fonts.bodyBold, letterSpacing: 0.5 },
   crop: { height: 150, borderRadius: radius.sm, borderWidth: 1 },
+  photoBar: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  wholePage: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 4 },
   card: { borderWidth: 1, borderRadius: radius.md, padding: 14, gap: 10 },
   stepper: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   step: { width: 52, height: 52, borderRadius: radius.md, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center' },
