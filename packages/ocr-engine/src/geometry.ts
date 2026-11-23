@@ -33,6 +33,24 @@ export function tileRects(rect: NormRect, tiles?: TileSpec, rowsOverride?: numbe
   }));
 }
 
+/**
+ * One column's part of one strip of its region. A leaning column moves sideways down
+ * the page, so each strip takes the stretch of it that strip crosses (a little wider
+ * than the column, by how far it leans within the strip). Strips are a few rows tall,
+ * so the crops follow the lean closely without warping the image.
+ */
+export function columnSlice(
+  column: { x: number; w: number; lean?: number },
+  region: Pick<NormRect, 'y' | 'h'>,
+  strip: Pick<NormRect, 'y' | 'h'>,
+): NormRect {
+  const lean = column.lean ?? 0;
+  const at = (y: number) => column.x + lean * clamp01((y - region.y) / Math.max(1e-6, region.h));
+  const a = at(strip.y);
+  const b = at(strip.y + strip.h);
+  return { x: Math.min(a, b), y: strip.y, w: column.w + Math.abs(b - a), h: strip.h };
+}
+
 /** Map a normalized rect onto an image, clamped to its bounds and at least 1px. */
 export function toPixels(rect: NormRect, width: number, height: number): PixelRect {
   const x0 = clamp01(rect.x);

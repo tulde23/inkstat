@@ -1,7 +1,7 @@
 // Pure core: safe to import anywhere (domains, tests). No native modules.
 export * from './types';
 export { coerce, describeSchema, extractJson, toJsonSchema } from './schema';
-export { stripCount, tileRects, toPixels } from './geometry';
+export { columnSlice, stripCount, tileRects, toPixels } from './geometry';
 export {
   buildPrompt,
   columnLayout,
@@ -17,6 +17,7 @@ export { anchorText, anchorsFrom, applyAffine, fitPerspective, isPerspective, ma
 export {
   alignParts as alignTemplateParts,
   anchorsForTemplate,
+  bandOf,
   builtinTemplate,
   fullRect,
   isBandPart,

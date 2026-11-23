@@ -82,7 +82,7 @@ export function safeTemplateName(name: string, builtinId?: string | null): strin
 // The app's own range: a box may hang a little off the page edge.
 const unit = z.number().min(-0.5).max(1.5);
 const box = z.object({ x: unit, y: unit, w: unit, h: unit });
-const band = z.object({ x: unit, w: unit });
+const band = z.object({ x: unit, w: unit, lean: z.number().min(-0.5).max(0.5).optional() });
 
 /** Whether a page holds one team or both, and where home is. */
 export const sheetSchema = z.object({

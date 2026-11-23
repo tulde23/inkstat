@@ -1,4 +1,4 @@
-import { anchorsFrom, mapRect, matchLayout, type Anchor, type LayoutMatch } from './align';
+import { anchorsFrom, applyAffine, mapRect, matchLayout, type Anchor, type LayoutMatch } from './align';
 import type { DocumentTemplate, ExtractionRun, NormRect, TextLine, TextWord } from './types';
 
 /**
@@ -15,7 +15,16 @@ import type { DocumentTemplate, ExtractionRun, NormRect, TextLine, TextWord } fr
 export interface Band {
   x: number;
   w: number;
+  /**
+   * How far the column's left edge moves sideways from the top of the rows box to the
+   * bottom (fraction of page width): a column that leans on a tilted photo or an unevenly
+   * printed form. Left out (or 0) for a straight column.
+   */
+  lean?: number;
 }
+
+/** A band as stored: the lean is kept only when it is more than a hair. */
+export const bandOf = (x: number, w: number, lean = 0): Band => (Math.abs(lean) >= 0.001 ? { x, w, lean } : { x, w });
 
 export type PartShape = 'box' | 'band';
 
@@ -190,7 +199,10 @@ export function normalizeTemplate<Id extends string>(t: Template<Id>, c: Catalog
       const lo = rows?.x ?? 0;
       const hi = rows ? rows.x + rows.w : 1;
       const x = clamp(value.x, lo, hi - 0.01);
-      parts[id] = { x, w: clamp(value.w, 0.01, hi - x) };
+      const w = clamp(value.w, 0.01, hi - x);
+      // The bottom of a leaning column stays inside the rows box too.
+      const lean = (value as Band).lean ? clamp(x + (value as Band).lean!, lo, Math.max(lo, hi - w)) - x : 0;
+      parts[id] = bandOf(x, w, lean);
     } else {
       parts[id] = box(value as NormRect);
     }
@@ -214,13 +226,17 @@ export const isUsable = <Id extends string>(t: Template<Id>, c: Catalog<Id>) =>
 export const variantOf = <Id extends string>(t: Pick<Template<Id>, 'variants'>, c: Catalog<Id>, id: Id): string | undefined =>
   t.variants?.[id] ?? specOf(c, id).variants?.[0].id;
 
-/** A part's full rect on the page; bands take their height from the rows box (or its default). */
+/**
+ * A part's full rect on the page; bands take their height from the rows box (or its
+ * default). A leaning band gives the rect that holds all of it.
+ */
 export function fullRect<Id extends string>(t: Template<Id>, c: Catalog<Id>, id: Id): NormRect | null {
   const v = t.parts[id];
   if (!v) return null;
   if (!isBandPart(c, id)) return v as NormRect;
   const rows = (t.parts[c.rowsPart] ?? c.defaults[c.rowsPart]) as NormRect;
-  return { x: v.x, w: v.w, y: rows.y, h: rows.h };
+  const lean = (v as Band).lean ?? 0;
+  return { x: v.x + Math.min(0, lean), w: v.w + Math.abs(lean), y: rows.y, h: rows.h };
 }
 
 const normWord = (t: string) => t.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -274,7 +290,11 @@ export function matchLibrary<Id extends string>(lines: TextLine[], library: Buil
   return best;
 }
 
-/** Parts mapped from reference coordinates onto a photo. Bands are mapped as full columns and keep their new left edge and width. */
+/**
+ * Parts mapped from reference coordinates onto a photo. A band's left edge is mapped
+ * as a line, so on a rotated or tilted photo the column leans with the page instead of
+ * becoming a wider straight box that takes in its neighbours.
+ */
 export function alignParts<Id extends string>(
   parts: Partial<Record<Id, NormRect | Band>>,
   match: LayoutMatch,
@@ -286,13 +306,28 @@ export function alignParts<Id extends string>(
     if (!v) continue;
     if (isBandPart(c, id)) {
       if (!rows) continue;
-      const r = mapRect(match.transform, { x: v.x, w: v.w, y: rows.y, h: rows.h });
-      out[id] = { x: r.x, w: r.w };
+      out[id] = alignBand(v as Band, rows, match);
     } else {
       out[id] = mapRect(match.transform, v as NormRect);
     }
   }
   return out;
+}
+
+function alignBand(v: Band, rows: NormRect, match: LayoutMatch): Band {
+  const T = match.transform;
+  const lean = v.lean ?? 0;
+  const box = mapRect(T, rows);
+  const top = applyAffine(T, v.x, rows.y);
+  const bottom = applyAffine(T, v.x + lean, rows.y + rows.h);
+  // The left edge as a line, read where the mapped rows box starts and ends.
+  const dy = bottom.y - top.y;
+  const xAt = (y: number) => (Math.abs(dy) < 1e-9 ? top.x : top.x + ((bottom.x - top.x) * (y - top.y)) / dy);
+  const x = xAt(box.y);
+  const midY = rows.y + rows.h / 2;
+  const midX = v.x + lean / 2;
+  const w = applyAffine(T, midX + v.w, midY).x - applyAffine(T, midX, midY).x;
+  return bandOf(x, Math.max(0.005, w), xAt(box.y + box.h) - x);
 }
 
 /** Anchors to keep with a template, so later photos can be lined up with it. */

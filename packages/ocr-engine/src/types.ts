@@ -74,6 +74,8 @@ export type TileSpec = FixedTileSpec | AspectTileSpec;
 export interface ColumnSpec {
   x: number;
   w: number;
+  /** The left edge's sideways shift from the region's top to its bottom: a leaning column. */
+  lean?: number;
   /** Told to the model, e.g. "jersey number and name columns". */
   label: string;
 }

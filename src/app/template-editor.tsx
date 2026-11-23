@@ -26,7 +26,7 @@ import {
   type Placement,
   type ScorebookTemplate,
 } from '@inkstat/basketball';
-import type { NormRect, TextLine } from '@inkstat/ocr-engine';
+import { bandOf, columnSlice, type Band, type NormRect, type TextLine } from '@inkstat/ocr-engine';
 import * as ImagePicker from 'expo-image-picker';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
@@ -102,6 +102,12 @@ function fullRect(t: ScorebookTemplate, id: PartId): NormRect | null {
   const rows = (t.parts.rows ?? DEFAULT_PARTS.rows) as NormRect;
   return { x: v.x, w: v.w, y: rows.y, h: rows.h };
 }
+
+/** How far a band's left edge moves from the top of the rows box to the bottom; 0 for boxes. */
+const leanOf = (t: ScorebookTemplate, id: PartId) => (isBand(id) ? ((t.parts[id] as Band | undefined)?.lean ?? 0) : 0);
+
+/** What a box or band stores once moved on the page. */
+const placed = (p: PartId, r: NormRect, lean?: number) => (isBand(p) ? bandOf(r.x, r.w, lean) : r);
 
 const STATUS_LABEL: Record<PartStatus, string> = { strong: 'Strong', ok: 'OK', weak: 'Weak', untested: 'New', planned: 'Coming soon' };
 
@@ -343,7 +349,7 @@ export default function TemplateEditor() {
           aspect={aspect}
           width={screenW - EDGE * 2}
           height={Math.round(screenH * 0.36)}
-          onRect={(p, r) => update((t) => ({ ...t, parts: { ...t.parts, [p]: isBand(p) ? { x: r.x, w: r.w } : r } }))}
+          onRect={(p, r, lean) => update((t) => ({ ...t, parts: { ...t.parts, [p]: placed(p, r, lean) } }))}
           onVariant={(p, v) => update((t) => ({ ...t, variants: { ...t.variants, [p]: v } }))}
           onBack={() => {
             if (step.parts.length > 1 && detail > 0) setDetail(detail - 1);
@@ -385,12 +391,12 @@ export default function TemplateEditor() {
             const i = steps.findIndex((s) => s.parts.includes(p));
             if (i >= 0) enterStep(i, steps[i].parts.indexOf(p));
           }}
-          onRect={(p, r) => update((t) => ({ ...t, parts: { ...t.parts, [p]: isBand(p) ? { x: r.x, w: r.w } : r } }))}
+          onRect={(p, r, lean) => update((t) => ({ ...t, parts: { ...t.parts, [p]: placed(p, r, lean) } }))}
           onPlace={(p, r) =>
             update((t) => ({
               ...t,
               enabled: t.enabled.includes(p) ? t.enabled : [...t.enabled, p],
-              parts: { ...t.parts, [p]: isBand(p) ? { x: r.x, w: r.w } : r },
+              parts: { ...t.parts, [p]: placed(p, r) },
             }))
           }
           onRemove={(p) => update((t) => ({ ...t, enabled: t.enabled.filter((x) => x !== p), parts: { ...t.parts, [p]: undefined } }))}
@@ -766,7 +772,7 @@ function MarkPhase({
   aspect: number;
   width: number;
   height: number;
-  onRect: (p: PartId, r: NormRect) => void;
+  onRect: (p: PartId, r: NormRect, lean?: number) => void;
   onVariant: (p: PartId, v: string) => void;
   onBack: () => void;
   onSkip: (p: PartId) => void;
@@ -782,7 +788,7 @@ function MarkPhase({
   // Everything else already marked, faint, for context.
   const shapes: MarkerShape[] = markedParts(tpl)
     .filter((p) => p !== part)
-    .map((p) => ({ id: p, rect: fullRect(tpl, p)!, color: PART_COLORS[p] }));
+    .map((p) => ({ id: p, rect: fullRect(tpl, p)!, color: PART_COLORS[p], lean: leanOf(tpl, p) }));
 
   const nextLabel = (() => {
     if (step.parts.length > 1 && detail < step.parts.length - 1) return `Looks right · next: ${partSpec(step.parts[detail + 1]).name.toLowerCase()}`;
@@ -793,9 +799,8 @@ function MarkPhase({
   // What InkStat will see for the player table: its columns joined, top few rows.
   const previewBands = (['names', 'fouls', 'points'] as PartId[])
     .filter((p) => tpl.enabled.includes(p) && tpl.parts[p])
-    .map((p) => fullRect(tpl, p)!)
-    .sort((a, b) => a.x - b.x)
-    .map((r) => ({ ...r, h: r.h * 0.22 }));
+    .map((p) => columnSlice(tpl.parts[p] as Band, rows, { y: rows.y, h: rows.h * 0.22 }))
+    .sort((a, b) => a.x - b.x);
 
   return (
     <>
@@ -858,14 +863,18 @@ function MarkPhase({
           width={width}
           height={height}
           shapes={shapes}
-          active={rect ? { id: part, rect, color: PART_COLORS[part] } : null}
+          active={rect ? { id: part, rect, color: PART_COLORS[part], lean: leanOf(tpl, part) } : null}
           band={band}
-          onChange={(r) => onRect(part, r)}
+          onChange={(r, lean) => onRect(part, r, lean)}
         />
         </View>
 
         <View style={[base.content, { gap: space.sm, paddingTop: space.sm }]}>
-          <T muted style={base.small}>Drag the box or its corners. Pinch or double-tap to zoom, then drag the page to look around.</T>
+          <T muted style={base.small}>
+            {isBand(part)
+              ? 'Drag the column or its sides. If the column leans, drag the white handle at its top or bottom sideways until it follows the column. Pinch or double-tap to zoom.'
+              : 'Drag the box or its corners. Pinch or double-tap to zoom, then drag the page to look around.'}
+          </T>
           {isBand(part) && previewBands.length > 1 && (
             <View style={{ gap: 6 }}>
               <T style={{ fontSize: 13, fontFamily: fonts.bodyBold }}>What InkStat will see</T>
@@ -937,7 +946,7 @@ function ReviewPhase({
   width: number;
   height: number;
   onEdit: (p: PartId) => void;
-  onRect: (p: PartId, r: NormRect) => void;
+  onRect: (p: PartId, r: NormRect, lean?: number) => void;
   onPlace: (p: PartId, r: NormRect) => void;
   onRemove: (p: PartId) => void;
   onVariant: (p: PartId, v: string) => void;
@@ -988,16 +997,16 @@ function ReviewPhase({
           height={height}
           shapes={marked
             .filter((p) => adding || p !== sel)
-            .map((p) => ({ id: p, rect: fullRect(tpl, p)!, color: PART_COLORS[p], label: partSpec(p).name }))}
+            .map((p) => ({ id: p, rect: fullRect(tpl, p)!, color: PART_COLORS[p], label: partSpec(p).name, lean: leanOf(tpl, p) }))}
           active={
             adding
               ? { id: 'new', rect: adding, color: c.text }
               : sel
-                ? { id: sel, rect: fullRect(tpl, sel)!, color: PART_COLORS[sel], label: partSpec(sel).name }
+                ? { id: sel, rect: fullRect(tpl, sel)!, color: PART_COLORS[sel], label: partSpec(sel).name, lean: leanOf(tpl, sel) }
                 : null
           }
           band={!adding && sel && isBand(sel) ? { y: rows.y, h: rows.h } : null}
-          onChange={adding ? (r) => setAdding(r) : sel ? (r) => onRect(sel, r) : undefined}
+          onChange={adding ? (r) => setAdding(r) : sel ? (r, lean) => onRect(sel, r, lean) : undefined}
           onTapShape={adding ? undefined : (id) => setSelected(id as PartId)}
           allowDraw={!!adding}
           showLabels

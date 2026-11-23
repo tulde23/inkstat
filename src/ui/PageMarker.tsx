@@ -9,6 +9,7 @@ import {
   type GestureResponderEvent,
   type NativeTouchEvent,
 } from 'react-native';
+import Svg, { Polygon } from 'react-native-svg';
 
 import { T } from './components';
 import { fonts } from './theme';
@@ -19,6 +20,8 @@ export interface MarkerShape {
   rect: NormRect;
   color: string;
   label?: string;
+  /** A band that leans: how far its left edge moves sideways from top to bottom (fraction of the page). */
+  lean?: number;
 }
 
 const MAX_SCALE = 6;
@@ -35,8 +38,14 @@ type Mode =
   | { kind: 'zoom'; s: number; tx: number; ty: number; d: number; cx: number; cy: number }
   | { kind: 'pan'; tx: number; ty: number; sx: number; sy: number }
   | { kind: 'draw'; x0: number; y0: number }
-  | { kind: 'move'; start: NormRect; x0: number; y0: number }
-  | { kind: 'resize'; start: NormRect; hx: 0 | 1 | null; hy: 0 | 1 | null; x0: number; y0: number };
+  | { kind: 'move'; start: NormRect; lean: number; x0: number; y0: number }
+  | { kind: 'resize'; start: NormRect; lean: number; hx: 0 | 1 | null; hy: 0 | 1 | null; x0: number; y0: number }
+  | { kind: 'lean'; start: NormRect; lean: number; end: 'top' | 'bottom'; x0: number };
+
+/** Where a leaning shape's left edge is at page height y. */
+const leftAt = (r: NormRect, lean: number, y: number) => r.x + lean * clamp((y - r.y) / Math.max(1e-6, r.h), 0, 1);
+const inside = (r: NormRect, lean: number, p: { x: number; y: number }) =>
+  p.y >= r.y && p.y <= r.y + r.h && p.x >= leftAt(r, lean, p.y) && p.x <= leftAt(r, lean, p.y) + r.w;
 
 /** A finger must travel this far (screen px) before it changes anything: taps and pinch starts stay harmless. */
 const SLOP = 8;
@@ -48,6 +57,8 @@ const DOUBLE_TAP_SCALE = 2.5;
 /**
  * A page photo to mark boxes on.
  * - One finger on the box moves it; on a corner (a band: an edge) resizes it.
+ * - A band also has a handle in the middle of its top and bottom edges: drag one
+ *   sideways to make the column lean, for a tilted photo or an uneven printed column.
  * - One finger elsewhere draws a new box at 1x, and pans the page when zoomed in.
  * - Two fingers pinch to zoom and pan; whatever the first finger changed is undone.
  * - Double tap zooms in on that spot, or back out.
@@ -76,7 +87,8 @@ export function PageMarker({
   active?: MarkerShape | null;
   /** When set, the active shape is a band: only x and width change, y and height come from here. */
   band?: { y: number; h: number } | null;
-  onChange?: (rect: NormRect) => void;
+  /** A band's change also gives its lean. */
+  onChange?: (rect: NormRect, lean?: number) => void;
   showLabels?: boolean;
   /** A tap (not a drag) on a shape: lets a screen make that shape the active one. */
   onTapShape?: (id: string) => void;
@@ -111,16 +123,19 @@ export function PageMarker({
       // Content is w x h at scale 1; keep it covering the viewport.
       return { s, tx: clamp(tx, w - w * s, 0), ty: clamp(ty, h - h * s, 0) };
     };
-    const emit = (r: NormRect) => {
+    const emit = (r: NormRect, lean = 0) => {
       const b = latest.current.band;
       const x = clamp(r.x, 0, 1);
       const y = clamp(r.y, 0, 1);
       const out = { x, y, w: clamp(r.w, 0.005, 1 - x), h: clamp(r.h, 0.005, 1 - y) };
-      latest.current.onChange?.(b ? { x: out.x, w: out.w, y: b.y, h: b.h } : out);
+      if (!b) return latest.current.onChange?.(out);
+      // The bottom of a leaning band stays on the page too.
+      const l = clamp(out.x + lean, 0, Math.max(0, 1 - out.w)) - out.x;
+      latest.current.onChange?.({ x: out.x, w: out.w, y: b.y, h: b.h }, l);
     };
 
     // The gesture's starting state: put back if a second finger turns it into a pinch.
-    const gesture = { startRect: null as NormRect | null, x0: 0, y0: 0, moved: false, lastTap: 0 };
+    const gesture = { startRect: null as NormRect | null, startLean: 0, x0: 0, y0: 0, moved: false, lastTap: 0 };
     // Where the viewport sits on screen, taken from the first finger of each gesture
     // (one finger's locationX is reliable); every position after that is pageX - origin.
     const origin = { x: 0, y: 0 };
@@ -129,7 +144,7 @@ export function PageMarker({
     const mid = (a: NativeTouchEvent, b: NativeTouchEvent) => ({ x: (lx(a) + lx(b)) / 2, y: (ly(a) + ly(b)) / 2 });
 
     const startZoom = (t: readonly NativeTouchEvent[]) => {
-      if (gesture.moved && gesture.startRect && latest.current.onChange) emit(gesture.startRect);
+      if (gesture.moved && gesture.startRect && latest.current.onChange) emit(gesture.startRect, gesture.startLean);
       gesture.moved = true; // a pinch is never a tap
       const v = latest.current.view;
       const m = mid(t[0], t[1]);
@@ -141,6 +156,7 @@ export function PageMarker({
       const v = latest.current.view;
       const p = toPage(lx(t), ly(t));
       gesture.startRect = a?.rect ?? null;
+      gesture.startLean = a?.lean ?? 0;
       gesture.x0 = lx(t);
       gesture.y0 = ly(t);
       gesture.moved = false;
@@ -151,16 +167,24 @@ export function PageMarker({
       }
       const r = a.rect;
       const isBand = !!latest.current.band;
-      const tl = toScreen(r.x, r.y);
-      const br = toScreen(r.x + r.w, r.y + r.h);
+      const lean = isBand ? (a.lean ?? 0) : 0;
+      // A band's sides are where its edges cross the finger's height.
+      const edgeY = clamp(p.y, r.y, r.y + r.h);
+      const tl = toScreen(leftAt(r, lean, edgeY), r.y);
+      const br = toScreen(leftAt(r, lean, edgeY) + r.w, r.y + r.h);
       const near = (val: number, edge: number) => Math.abs(val - edge) <= HIT;
       const hx = near(lx(t), tl.x) ? 0 : near(lx(t), br.x) ? 1 : null;
       const hy = isBand ? null : near(ly(t), tl.y) ? 0 : near(ly(t), br.y) ? 1 : null;
       const inY = ly(t) >= tl.y - HIT && ly(t) <= br.y + HIT;
-      if (isBand ? hx !== null && inY : hx !== null && hy !== null) {
-        mode.current = { kind: 'resize', start: r, hx, hy, x0: p.x, y0: p.y };
-      } else if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h) {
-        mode.current = { kind: 'move', start: r, x0: p.x, y0: p.y };
+      const top = toScreen(r.x + r.w / 2, r.y);
+      const bottom = toScreen(r.x + lean + r.w / 2, r.y + r.h);
+      const onHandle = (q: { x: number; y: number }) => Math.hypot(lx(t) - q.x, ly(t) - q.y) <= HIT * 1.25;
+      if (isBand && (onHandle(top) || onHandle(bottom))) {
+        mode.current = { kind: 'lean', start: r, lean, end: onHandle(top) ? 'top' : 'bottom', x0: p.x };
+      } else if (isBand ? hx !== null && inY : hx !== null && hy !== null) {
+        mode.current = { kind: 'resize', start: r, lean, hx, hy, x0: p.x, y0: p.y };
+      } else if (inside(r, lean, p)) {
+        mode.current = { kind: 'move', start: r, lean, x0: p.x, y0: p.y };
       } else if (v.s > 1.01 || !latest.current.allowDraw) {
         mode.current = pan;
       } else {
@@ -228,7 +252,13 @@ export function PageMarker({
           if (w > MIN_DRAW && (latest.current.band || h > MIN_DRAW)) emit({ x, y, w, h });
         } else if (m.kind === 'move') {
           const r = m.start;
-          emit({ ...r, x: clamp(r.x + p.x - m.x0, 0, 1 - r.w), y: clamp(r.y + p.y - m.y0, 0, 1 - r.h) });
+          const x = clamp(r.x + p.x - m.x0, Math.max(0, -m.lean), 1 - r.w - Math.max(0, m.lean));
+          emit({ ...r, x, y: clamp(r.y + p.y - m.y0, 0, 1 - r.h) }, m.lean);
+        } else if (m.kind === 'lean') {
+          // The top handle moves the top edge (the bottom stays put); the bottom handle the bottom.
+          const d = p.x - m.x0;
+          if (m.end === 'top') emit({ ...m.start, x: m.start.x + d }, m.lean - d);
+          else emit(m.start, m.lean + d);
         } else if (m.kind === 'resize') {
           const r = m.start;
           let x0 = r.x, y0 = r.y, x1 = r.x + r.w, y1 = r.y + r.h;
@@ -237,7 +267,7 @@ export function PageMarker({
           if (m.hx === 1) x1 = Math.max(x1 + dx, x0 + MIN_DRAW);
           if (m.hy === 0) y0 = Math.min(y0 + dy, y1 - MIN_DRAW);
           if (m.hy === 1) y1 = Math.max(y1 + dy, y0 + MIN_DRAW);
-          emit({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+          emit({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, m.lean);
         }
       },
       onPanResponderRelease: (e: GestureResponderEvent) => {
@@ -255,7 +285,7 @@ export function PageMarker({
               const p = toPage(gesture.x0, gesture.y0);
               const all = [...latest.current.shapes, ...(latest.current.active ? [latest.current.active] : [])];
               const hit = all
-                .filter((sh) => p.x >= sh.rect.x && p.x <= sh.rect.x + sh.rect.w && p.y >= sh.rect.y && p.y <= sh.rect.y + sh.rect.h)
+                .filter((sh) => inside(sh.rect, sh.lean ?? 0, p))
                 .sort((a, b) => a.rect.w * a.rect.h - b.rect.w * b.rect.h)[0];
               if (hit && hit.id !== latest.current.active?.id) tap(hit.id);
             }
@@ -278,7 +308,13 @@ export function PageMarker({
   });
   const handle = 18 / s;
   const activeRect = active?.rect;
+  const activeLean = band ? (active?.lean ?? 0) : 0;
+  // A band's side handles sit halfway down, where its leaning edges are by then.
   const corners: [number, number][] = band ? [[0, 0.5], [1, 0.5]] : [[0, 0], [1, 0], [0, 1], [1, 1]];
+  const at = (x: number, y: number) => `${off.x + x * fit.w},${off.y + y * fit.h}`;
+  const quad = (r: NormRect, lean: number) =>
+    [at(r.x, r.y), at(r.x + r.w, r.y), at(r.x + lean + r.w, r.y + r.h), at(r.x + lean, r.y + r.h)].join(' ');
+  const leaning = (sh: MarkerShape) => Math.abs(sh.lean ?? 0) > 1e-4;
 
   return (
     <View style={[styles.viewport, { width, height }]} {...responder}>
@@ -291,13 +327,24 @@ export function PageMarker({
           transform: [{ translateX: view.tx }, { translateY: view.ty }, { scale: s }],
         }}>
         <Image source={{ uri }} style={{ position: 'absolute', ...px({ x: 0, y: 0, w: 1, h: 1 }) }} resizeMode="stretch" />
+        {/* Leaning columns are drawn as slanted outlines. */}
+        <Svg width={width} height={height} style={StyleSheet.absoluteFill}>
+          {shapes.filter(leaning).map((sh) => (
+            <Polygon key={sh.id} points={quad(sh.rect, sh.lean!)} stroke={sh.color} strokeWidth={1.5 / s} fill={sh.color} fillOpacity={0.1} />
+          ))}
+          {active && activeRect && activeLean !== 0 && (
+            <Polygon points={quad(activeRect, activeLean)} stroke={active.color} strokeWidth={3 / s} fill={active.color} fillOpacity={0.19} />
+          )}
+        </Svg>
         {shapes.map((sh) => (
           <View
             key={sh.id}
             style={[
               styles.shape,
               px(sh.rect),
-              { borderColor: sh.color, borderWidth: 1.5 / s, backgroundColor: sh.color + '1A', borderRadius: 3 / s },
+              leaning(sh)
+                ? null
+                : { borderColor: sh.color, borderWidth: 1.5 / s, backgroundColor: sh.color + '1A', borderRadius: 3 / s },
             ]}>
             {showLabels && sh.label && (
               <T style={[styles.label, { backgroundColor: sh.color, fontSize: 10 / s, lineHeight: 14 / s, top: -15 / s, paddingHorizontal: 4 / s }]}>
@@ -308,20 +355,47 @@ export function PageMarker({
         ))}
         {active && activeRect && (
           <>
-            <View
-              style={[
-                styles.shape,
-                px(activeRect),
-                { borderColor: active.color, borderWidth: 3 / s, backgroundColor: active.color + '30', borderRadius: 3 / s },
-              ]}
-            />
+            {activeLean === 0 && (
+              <View
+                style={[
+                  styles.shape,
+                  px(activeRect),
+                  { borderColor: active.color, borderWidth: 3 / s, backgroundColor: active.color + '30', borderRadius: 3 / s },
+                ]}
+              />
+            )}
+            {band &&
+              (
+                [
+                  [activeRect.x + activeRect.w / 2, activeRect.y],
+                  [activeRect.x + activeLean + activeRect.w / 2, activeRect.y + activeRect.h],
+                ] as const
+              ).map(([hx, hy], i) => (
+                // Lean handles: wide white pills, to say "drag me sideways".
+                <View
+                  key={`lean${i}`}
+                  style={[
+                    styles.handle,
+                    {
+                      left: off.x + hx * fit.w - handle,
+                      top: off.y + hy * fit.h - handle / 2,
+                      width: handle * 2,
+                      height: handle,
+                      borderRadius: handle / 2,
+                      borderWidth: 2.5 / s,
+                      borderColor: active.color,
+                      backgroundColor: '#FFFFFF',
+                    },
+                  ]}
+                />
+              ))}
             {corners.map(([cx, cy], i) => (
               <View
                 key={i}
                 style={[
                   styles.handle,
                   {
-                    left: off.x + (activeRect.x + cx * activeRect.w) * fit.w - handle / 2,
+                    left: off.x + (activeRect.x + activeLean * cy + cx * activeRect.w) * fit.w - handle / 2,
                     top: off.y + (activeRect.y + cy * activeRect.h) * fit.h - (band ? handle : handle / 2),
                     width: handle,
                     height: band ? handle * 2 : handle,

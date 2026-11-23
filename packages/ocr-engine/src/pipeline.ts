@@ -1,4 +1,4 @@
-import { stripCount, tileRects, toPixels } from './geometry';
+import { columnSlice, stripCount, tileRects, toPixels } from './geometry';
 import { coerce, describeSchema, extractJson, toJsonSchema } from './schema';
 import type {
   DocumentTemplate,
@@ -156,7 +156,7 @@ export async function runTemplate(
       ? job.region.pieces.map((p) => p.rect)
       : layout === 'full'
         ? [job.rect]
-        : job.region.columns!.map((c) => ({ x: c.x, y: job.rect.y, w: c.w, h: job.rect.h }));
+        : job.region.columns!.map((c) => columnSlice(c, job.region.rect, job.rect));
     let imageUris: string[] = [];
     for (const slice of slices) {
       imageUris.push(await images.crop(sourceUri, toPixels(slice, width, height), maxSide));

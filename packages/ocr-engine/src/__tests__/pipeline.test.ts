@@ -128,6 +128,27 @@ describe('runTemplate', () => {
     expect(crops).toHaveLength(4);
   });
 
+  it('follows a leaning column down the page, strip by strip', async () => {
+    const crops: string[] = [];
+    const recording: ImageOps = {
+      size: async () => ({ width: 1000, height: 1000 }),
+      crop: async (_uri, r) => {
+        const id = `${r.originX},${r.originY},${r.width}x${r.height}`;
+        crops.push(id);
+        return id;
+      },
+    };
+    const leaning: DocumentTemplate = {
+      ...template,
+      regions: [{ ...template.regions[0], columns: [{ x: 0.5, w: 0.25, lean: 0.25, label: 'totals' }] }],
+    };
+    const backend = fakeBackend(['{"n": 1}', '{"n": 2}']);
+    await runTemplate(backend, recording, 'page.jpg', leaning);
+    // Top strip: the edge moves 0.5 -> 0.625; bottom strip: 0.625 -> 0.75.
+    expect(backend.calls[0].imageUris).toEqual(['500,0,375x500']);
+    expect(backend.calls[1].imageUris).toEqual(['625,500,375x500']);
+  });
+
   describe('joined columns', () => {
     const joined: DocumentTemplate = {
       ...template,

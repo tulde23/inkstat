@@ -1,7 +1,7 @@
-import type { NormRect, TextLine } from '@inkstat/ocr-engine';
+import type { Band, NormRect, TextLine } from '@inkstat/ocr-engine';
 
 import { LIBRARY, alignParts, matchLibrary, templateForPhoto } from '../library';
-import { applyTemplate, migrateTemplate, newTemplate } from '../scorebook';
+import { applyTemplate, migrateTemplate, newTemplate, normalizeTemplate } from '../scorebook';
 import { SCOREBOOK_PAGE_TEMPLATE } from '../template';
 import champion from './fixtures/nfhs-champion-blank-ocr.json';
 import stars from './fixtures/stars-ocr.json';
@@ -28,6 +28,55 @@ describe('template library', () => {
     expect(rows.y).toBeCloseTo(0.392 * 0.8 + 0.05, 2);
     expect(parts.points!.x).toBeCloseTo(0.92 * 0.8 + 0.1, 2);
     expect(parts.points!.w).toBeCloseTo(0.032 * 0.8, 2);
+  });
+});
+
+/** The same page, turned a little about its centre (the photo was taken crooked). */
+const turned = (lines: TextLine[], deg: number): TextLine[] => {
+  const a = (deg * Math.PI) / 180;
+  const pt = (x: number, y: number) => ({
+    x: 0.5 + (x - 0.5) * Math.cos(a) - (y - 0.5) * Math.sin(a),
+    y: 0.5 + (x - 0.5) * Math.sin(a) + (y - 0.5) * Math.cos(a),
+  });
+  // Words are small, so moving each by its centre keeps them upright, as OCR reports them.
+  const r = (q: NormRect): NormRect => {
+    const c = pt(q.x + q.w / 2, q.y + q.h / 2);
+    return { x: c.x - q.w / 2, y: c.y - q.h / 2, w: q.w, h: q.h };
+  };
+  return lines.map((l) => ({ text: l.text, rect: r(l.rect), words: l.words.map((w) => ({ text: w.text, rect: r(w.rect) })) }));
+};
+
+describe('leaning columns', () => {
+  it('a column on a crooked photo leans with the page instead of widening', () => {
+    const m = matchLibrary(turned(champion, 2))!;
+    expect(m.layout.id).toBe('nfhs-champion');
+    const parts = alignParts(LIBRARY[0].parts, m.match);
+    const ref = LIBRARY[0].parts.points!;
+    const rowsH = (LIBRARY[0].parts.rows as NormRect).h;
+    // Turned clockwise, the left edge drifts left going down the page.
+    expect((parts.points as Band).lean).toBeCloseTo(-Math.sin((2 * Math.PI) / 180) * rowsH, 2);
+    expect(parts.points!.w).toBeCloseTo(ref.w, 2);
+  });
+
+  it('keeps a lean through normalizing, inside the rows box', () => {
+    const t = normalizeTemplate({
+      ...newTemplate('t', 'T', null),
+      enabled: ['rows', 'names', 'points'],
+      parts: { rows: { x: 0.1, y: 0.3, w: 0.8, h: 0.5 }, names: { x: 0.12, w: 0.2 }, points: { x: 0.8, w: 0.06, lean: 0.2 } },
+    });
+    const p = t.parts.points!;
+    expect((p as Band).lean).toBeCloseTo(0.04);
+    expect(t.parts.names).toEqual({ x: 0.12, w: 0.2 });
+  });
+
+  it('reads the leaning column through the template', () => {
+    const doc = applyTemplate(SCOREBOOK_PAGE_TEMPLATE, {
+      ...newTemplate('t', 'T', null),
+      enabled: ['rows', 'names', 'points'],
+      parts: { rows: { x: 0.1, y: 0.3, w: 0.8, h: 0.5 }, names: { x: 0.12, w: 0.2 }, points: { x: 0.8, w: 0.06, lean: 0.03 } },
+    });
+    const players = doc.regions.find((r) => r.columns?.some((c) => c.label.startsWith('total points')))!;
+    expect(players.columns!.find((c) => c.label.startsWith('total points'))!.lean).toBeCloseTo(0.03);
   });
 });
 

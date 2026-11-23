@@ -1,4 +1,4 @@
-import { stripCount, tileRects } from '../geometry';
+import { columnSlice, stripCount, tileRects } from '../geometry';
 import { withRegionOverrides } from '../pipeline';
 import type { DocumentTemplate, RegionSpec } from '../types';
 
@@ -48,5 +48,25 @@ describe('withRegionOverrides', () => {
     expect(out.regions[0].rect).toEqual({ x: 0, y: 0, w: 1, h: 1 });
     expect(out.regions[0].prompt).toBe('p');
     expect(out.regions[1]).toBe(t.regions[1]);
+  });
+});
+
+describe('columnSlice', () => {
+  const rows = { y: 0.2, h: 0.6 };
+  it('is the plain column when it does not lean', () => {
+    expect(columnSlice({ x: 0.5, w: 0.1 }, rows, { y: 0.2, h: 0.3 })).toEqual({ x: 0.5, y: 0.2, w: 0.1, h: 0.3 });
+  });
+  it('takes the stretch a leaning column crosses in each strip', () => {
+    const top = columnSlice({ x: 0.5, w: 0.1, lean: 0.06 }, rows, { y: 0.2, h: 0.3 });
+    const bottom = columnSlice({ x: 0.5, w: 0.1, lean: 0.06 }, rows, { y: 0.5, h: 0.3 });
+    expect(top.x).toBeCloseTo(0.5);
+    expect(top.w).toBeCloseTo(0.13);
+    expect(bottom.x).toBeCloseTo(0.53);
+    expect(bottom.w).toBeCloseTo(0.13);
+  });
+  it('leans left too', () => {
+    const r = columnSlice({ x: 0.5, w: 0.1, lean: -0.06 }, rows, { y: 0.5, h: 0.3 });
+    expect(r.x).toBeCloseTo(0.44);
+    expect(r.w).toBeCloseTo(0.13);
   });
 });
