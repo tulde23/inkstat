@@ -5,25 +5,32 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Path } from 'react-native-svg';
 
-import { READ_IN_PROGRESS_KEY, clearSetting, clearTombstone, deleteGame, getSetting, listGames, saveGame } from '@/db';
 import {
-  formatGamesBehind,
-  formatPct,
+  READ_IN_PROGRESS_KEY,
+  clearSetting,
+  clearTombstone,
+  currentTeam,
+  deleteGame,
+  getSetting,
+  listGames,
+  listTeams,
+  saveGame,
+  setCurrentTeam,
+} from '@/db';
+import {
+  myPlayers,
+  myResult,
   perGame,
   seasonFor,
-  seasonTotals,
-  standings,
-  teamKey,
-  teamScore,
+  teamSeason,
   validateGame,
   type Game,
-  type StandingRow,
+  type MyResult,
+  type MyTeam,
 } from '@inkstat/basketball';
 import { activeModel, type ActiveModel } from '@/engine/host';
 import { Badge, Button, Card, T } from '@/ui/components';
 import { deleteGameImages } from '@/lib/files';
-import { teamColors } from '@/lib/teamColor';
-import { HeaderTabs, TeamBadge } from '@/ui/HeaderTabs';
 import { LogoMark } from '@/ui/Logo';
 import { SyncSheet } from '@/ui/SyncSheet';
 import { useDialog } from '@/ui/Dialog';
@@ -31,11 +38,12 @@ import { useLightStatusBar } from '@/ui/useLightStatusBar';
 import { THEME_LABEL, getThemePreference, setThemePreference } from '@/ui/themePreference';
 import { base, fonts, space, useColors } from '@/ui/theme';
 
-type Tab = 'standings' | 'scores' | 'leaders';
+/** Games shown before "All". */
+const RECENT = 5;
 
 /**
- * Home is the league table, built from the games this scorekeeper has scanned:
- * standings, scores and leaders, with a big Scan button at the bottom.
+ * Home is your team: its record, its games and its leaders, with a big Scan button
+ * at the bottom. The first time, it asks which team you keep the book for.
  */
 export default function Home() {
   const db = useSQLiteContext();
@@ -43,19 +51,20 @@ export default function Home() {
   const dialog = useDialog();
   useLightStatusBar();
   const [all, setAll] = useState<Game[]>([]);
+  const [team, setTeam] = useState<MyTeam | null>(null);
+  const [teams, setTeams] = useState<MyTeam[]>([]);
   const [season, setSeason] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>('standings');
-  const [colors, setColors] = useState<Record<string, string>>({});
+  const [showAll, setShowAll] = useState(false);
   const [model, setModel] = useState<ActiveModel | null>(null);
   const [killedMidRead, setKilledMidRead] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
   const load = useCallback(async () => {
-    const list = await listGames(db);
-    const keys = new Set<string>();
-    for (const g of list) for (const s of [g.home, g.away]) if (s.name?.trim()) keys.add(teamKey(s.name));
-    setColors(await teamColors(db, [...keys]));
+    const [list, mine, every] = await Promise.all([listGames(db), currentTeam(db), listTeams(db)]);
     setAll(list);
+    setTeams(every);
+    setTeam(mine);
+    return mine;
   }, [db]);
 
   useFocusEffect(
@@ -64,8 +73,10 @@ export default function Home() {
       (async () => {
         const current = await activeModel(db);
         const interrupted = (await getSetting(db, READ_IN_PROGRESS_KEY)) !== null;
-        await load();
+        const mine = await load();
         if (!live) return;
+        // First run: whose book is this?
+        if (!mine) return router.replace('/team-setup');
         setModel(current);
         setKilledMidRead(interrupted);
       })();
@@ -75,59 +86,59 @@ export default function Home() {
     }, [db, load]),
   );
 
-  const seasons = useMemo(() => [...new Set(all.map((g) => g.season))].sort().reverse(), [all]);
+  const teamGames = useMemo(() => (team ? all.filter((g) => g.teamId === team.id) : []), [all, team]);
+  const seasons = useMemo(() => [...new Set(teamGames.map((g) => g.season))].sort().reverse(), [teamGames]);
   // Default to the season of the last game scanned: a misread year (2077) must not win.
-  const latest = useMemo(() => [...all].sort((a, b) => b.createdAt - a.createdAt)[0], [all]);
-  const shown = season ?? latest?.season ?? seasonFor(null);
-  const games = useMemo(() => all.filter((g) => g.season === shown), [all, shown]);
-  const table = useMemo(() => standings(games), [games]);
-  const toCheck = useMemo(() => games.filter((g) => validateGame(g).length > 0).length, [games]);
-
-  const openTeam = (key: string) => router.push({ pathname: '/team/[key]', params: { key, season: shown } });
+  const latest = useMemo(() => [...teamGames].sort((a, b) => b.createdAt - a.createdAt)[0], [teamGames]);
+  const shown = season && seasons.includes(season) ? season : (latest?.season ?? seasonFor(null));
+  const games = useMemo(() => teamGames.filter((g) => g.season === shown), [teamGames, shown]);
+  const record = useMemo(() => (team ? teamSeason(games, team.id) : null), [games, team]);
+  const leaders = useMemo(
+    () => (team ? [...myPlayers(games, team)].sort((a, b) => perGame(b.points, b.games) - perGame(a.points, a.games)).slice(0, 3) : []),
+    [games, team],
+  );
+  // Scanned before there were teams, or "this game isn't ours": not on the record.
+  const unlinked = useMemo(() => all.filter((g) => !g.teamId), [all]);
+  const toCheck = useMemo(() => games.filter((g) => validateGame(g).length > 0), [games]);
 
   const chooseSeason = () =>
     dialog.actions(
       'Season',
-      seasons.map((s) => ({ label: s, hint: `${all.filter((g) => g.season === s).length} games`, onPress: () => setSeason(s) })),
+      seasons.map((s) => ({ label: s, hint: `${teamGames.filter((g) => g.season === s).length} games`, onPress: () => setSeason(s) })),
     );
 
-  const more = () =>
-    dialog.actions('More', [
-      { label: 'Sync', hint: 'Your games and templates on all your devices', onPress: () => setSyncing(true) },
-      { label: 'Account', hint: 'Sign in, groups and invite links', onPress: () => router.push('/account') },
-      { label: 'Season stats and export', hint: 'Every player, CSV', onPress: () => router.push('/season') },
-      { label: 'Appearance', hint: THEME_LABEL[getThemePreference()], onPress: chooseTheme },
-      { label: 'Advanced', hint: 'Scoresheet templates, reading model', onPress: openAdvanced },
-    ]);
-
-  // Rarely needed: scans recognise the scoresheet and only ask to set one up when it's new.
-  const openAdvanced = () =>
-    dialog.actions('Advanced', [
-      { label: 'Scoresheet templates', hint: 'See, fix or build them part by part', onPress: () => router.push('/templates') },
-      { label: 'Reading model', hint: model?.name, onPress: () => router.push('/models') },
-    ]);
-
-  const chooseTheme = () => {
-    const current = getThemePreference();
-    dialog.actions(
-      'Appearance',
-      (['system', 'light', 'dark'] as const).map((t) => ({
-        label: `${t === current ? '✓  ' : ''}${THEME_LABEL[t]}`,
-        onPress: () => setThemePreference(t),
+  const switchTeam = () =>
+    dialog.actions('Your teams', [
+      ...teams.map((t) => ({
+        label: `${t.id === team?.id ? '●  ' : ''}${t.name}`,
+        onPress: () => {
+          setSeason(null);
+          void setCurrentTeam(db, t.id).then(load);
+        },
       })),
+      { label: '+ Add a team', onPress: () => router.push('/team-setup?add=1') },
+    ]);
+
+  const openUnlinked = () =>
+    dialog.actions(
+      'Games not on your record',
+      unlinked.slice(0, 12).map((g) => ({
+        label: `${g.home.name ?? 'Home'} vs ${g.away.name ?? 'Away'}`,
+        hint: g.date ?? undefined,
+        onPress: () => router.push({ pathname: '/game/whose', params: { id: g.id } }),
+      })),
+      'Tap a game to say which team is yours.',
     );
-  };
 
   const remove = async (game: Game) => {
-    const home = teamScore(game.home);
-    const away = teamScore(game.away);
+    const r = myResult(game);
     const ok = await dialog.confirm({
       title: 'Delete this game?',
       subject: {
-        label: `${game.home.name ?? 'Home'} vs ${game.away.name ?? 'Away'}`,
-        value: home !== null && away !== null ? `${home}–${away}` : undefined,
+        label: r?.opponent ? `vs ${r.opponent}` : `${game.home.name ?? 'Home'} vs ${game.away.name ?? 'Away'}`,
+        value: r && r.us !== null && r.them !== null ? `${r.us}–${r.them}` : undefined,
       },
-      body: 'The box score and both page photos go. Your templates stay.',
+      body: 'The box score and the page photos go. Your templates stay.',
       confirm: 'Delete game',
       cancel: 'Keep it',
       destructive: true,
@@ -157,7 +168,37 @@ export default function Home() {
     });
   };
 
+  const more = () =>
+    dialog.actions('More', [
+      { label: 'Sync', hint: 'Your games and templates on all your devices', onPress: () => setSyncing(true) },
+      { label: 'Account', hint: 'Sign in, groups and invite links', onPress: () => router.push('/account') },
+      { label: 'Season stats and export', hint: 'Every player, CSV', onPress: () => router.push('/season') },
+      { label: 'Appearance', hint: THEME_LABEL[getThemePreference()], onPress: chooseTheme },
+      { label: 'Advanced', hint: 'Scoresheet templates, reading model', onPress: openAdvanced },
+    ]);
+
+  // Rarely needed: scans recognise the scoresheet and only ask to set one up when it's new.
+  const openAdvanced = () =>
+    dialog.actions('Advanced', [
+      { label: 'Scoresheet templates', hint: 'See, fix or build them part by part', onPress: () => router.push('/templates') },
+      { label: 'Reading model', hint: model?.name, onPress: () => router.push('/models') },
+    ]);
+
+  const chooseTheme = () => {
+    const current = getThemePreference();
+    dialog.actions(
+      'Appearance',
+      (['system', 'light', 'dark'] as const).map((t) => ({
+        label: `${t === current ? '✓  ' : ''}${THEME_LABEL[t]}`,
+        onPress: () => setThemePreference(t),
+      })),
+    );
+  };
+
   const needsModel = model && !model.ready;
+  const results = record?.results ?? [];
+  const listed = showAll ? results : results.slice(0, RECENT);
+  const streak = record?.streak;
 
   return (
     <View style={[base.screen, { backgroundColor: c.bg }]}>
@@ -170,15 +211,26 @@ export default function Home() {
                 <LogoMark size={22} />
               </View>
             </Pressable>
-            <Pressable
-              onPress={seasons.length > 1 ? chooseSeason : undefined}
-              accessibilityRole={seasons.length > 1 ? 'button' : 'text'}
-              accessibilityLabel={`Season ${shown}${seasons.length > 1 ? ', change' : ''}`}
-              style={{ flex: 1, minHeight: 44, justifyContent: 'center' }}>
-              <Text style={[styles.title, { color: c.headerText }]}>My games</Text>
-              <Text style={[styles.subtitle, { color: c.headerText }]}>
-                {`Basketball · ${shown}${seasons.length > 1 ? '  ▾' : ''}`}
-              </Text>
+            <View style={{ flex: 1, minHeight: 44, justifyContent: 'center' }}>
+              <Pressable
+                onPress={teams.length > 1 ? switchTeam : () => router.push('/team-edit')}
+                accessibilityRole="button"
+                accessibilityLabel={`${team?.name ?? 'Your team'}, ${teams.length > 1 ? 'switch team' : 'edit team'}`}>
+                <Text numberOfLines={1} style={[styles.title, { color: c.headerText }]}>
+                  {`${team?.name ?? ''}${teams.length > 1 ? '  ▾' : ''}`}
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={seasons.length > 1 ? chooseSeason : undefined}
+                accessibilityRole={seasons.length > 1 ? 'button' : 'text'}
+                accessibilityLabel={`Season ${shown}${seasons.length > 1 ? ', change' : ''}`}>
+                <Text style={[styles.subtitle, { color: c.headerText }]}>{`${shown} season${seasons.length > 1 ? '  ▾' : ''}`}</Text>
+              </Pressable>
+            </View>
+            <Pressable onPress={() => router.push('/team-edit')} accessibilityRole="button" accessibilityLabel="Edit team" style={styles.iconButton}>
+              <Svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke={c.headerText} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <Path d="M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4" />
+              </Svg>
             </Pressable>
             <Pressable onPress={() => setSyncing(true)} accessibilityRole="button" accessibilityLabel="Sync" style={styles.iconButton}>
               <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={c.headerText} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
@@ -187,16 +239,6 @@ export default function Home() {
               </Svg>
             </Pressable>
           </View>
-          <HeaderTabs
-            color={c.headerText}
-            value={tab}
-            onChange={setTab}
-            tabs={[
-              { key: 'standings', label: 'Standings' },
-              { key: 'scores', label: 'Scores' },
-              { key: 'leaders', label: 'Leaders' },
-            ]}
-          />
         </View>
       </SafeAreaView>
 
@@ -229,32 +271,96 @@ export default function Home() {
             <Button title="Set up model" onPress={() => router.push('/models')} />
           </Card>
         )}
-        {toCheck > 0 && tab !== 'scores' && (
+        <View style={styles.tiles}>
+          <Card style={styles.tile}>
+            <T muted style={styles.tileLabel}>Record</T>
+            <Text style={[styles.tileValue, { color: c.text }]}>
+              {record ? `${record.wins}–${record.losses}${record.ties ? `–${record.ties}` : ''}` : '0–0'}
+            </Text>
+            <T style={[styles.tileNote, { color: streak ? (streak.kind === 'W' ? c.ok : streak.kind === 'L' ? c.error : c.muted) : c.muted }]}>
+              {streak
+                ? streak.count > 1
+                  ? `${streak.kind === 'W' ? 'Won' : streak.kind === 'L' ? 'Lost' : 'Tied'} ${streak.count} in a row`
+                  : `${streak.kind === 'W' ? 'Won' : streak.kind === 'L' ? 'Lost' : 'Tied'} the last game`
+                : 'No results yet'}
+            </T>
+          </Card>
+          <Card style={styles.tile}>
+            <T muted style={styles.tileLabel}>Points a game</T>
+            <Text style={[styles.tileValue, { color: c.text }]}>{record?.pointsFor ? String(record.pointsFor) : '–'}</Text>
+            <T muted style={styles.tileNote}>{record?.pointsAgainst ? `allowed ${record.pointsAgainst}` : ' '}</T>
+          </Card>
+        </View>
+
+        {toCheck.length > 0 && (
           <Pressable
-            onPress={() => setTab('scores')}
+            onPress={() => router.push({ pathname: '/game/[id]', params: { id: toCheck[0].id } })}
             accessibilityRole="button"
             style={[styles.strip, { backgroundColor: c.warnBg, borderLeftColor: c.warnLine }]}>
             <T style={{ flex: 1, fontSize: 14 }}>
-              <Text style={{ fontFamily: fonts.bodyBold }}>{`${toCheck} game${toCheck === 1 ? '' : 's'}`}</Text>
-              {` ${toCheck === 1 ? 'has' : 'have'} things to check.`}
+              <Text style={{ fontFamily: fonts.bodyBold }}>{`${toCheck.length} game${toCheck.length === 1 ? '' : 's'}`}</Text>
+              {` ${toCheck.length === 1 ? 'has' : 'have'} things to check.`}
             </T>
             <T style={{ color: c.accent, fontFamily: fonts.bodySemiBold }}>Review</T>
           </Pressable>
         )}
 
-        {tab === 'standings' && <StandingsTable rows={table} colors={colors} onTeam={openTeam} gameCount={games.length} />}
-        {tab === 'scores' && <Scores games={games} onDelete={remove} />}
-        {tab === 'leaders' && <Leaders games={games} colors={colors} onTeam={openTeam} />}
+        <Card style={styles.list}>
+          <View style={styles.listHead}>
+            <T style={{ flex: 1, fontFamily: fonts.bodyBold, fontSize: 16 }}>Games</T>
+            {results.length > RECENT && (
+              <Pressable onPress={() => setShowAll((v) => !v)} accessibilityRole="button" hitSlop={8}>
+                <T style={{ color: c.accent, fontFamily: fonts.bodySemiBold, fontSize: 14 }}>
+                  {showAll ? 'Fewer' : `All ${results.length}`}
+                </T>
+              </Pressable>
+            )}
+          </View>
+          {listed.length === 0 && (
+            <T muted style={{ paddingHorizontal: 14, paddingBottom: 14 }}>No games yet. Tap Scan a game after your next game.</T>
+          )}
+          {listed.map((r) => (
+            <ResultRow key={r.game.id} result={r} onDelete={() => void remove(r.game)} />
+          ))}
+        </Card>
+        {listed.length > 0 && <T muted style={base.small}>Press and hold a game to delete it.</T>}
+
+        {leaders.length > 0 && (
+          <Card style={styles.list}>
+            <View style={styles.listHead}>
+              <T style={{ flex: 1, fontFamily: fonts.bodyBold, fontSize: 16 }}>Team leaders · points a game</T>
+              <Pressable onPress={() => router.push('/season')} accessibilityRole="button" hitSlop={8}>
+                <T style={{ color: c.accent, fontFamily: fonts.bodySemiBold, fontSize: 14 }}>Season stats</T>
+              </Pressable>
+            </View>
+            {leaders.map((p, i) => (
+              <View key={p.key} style={[styles.leader, { borderTopColor: c.border }]}>
+                <Text style={[styles.rank, { color: c.muted }]}>{i + 1}</Text>
+                <T style={{ flex: 1, fontSize: 15 }}>{`${p.number ? `#${p.number} ` : ''}${p.name ?? ''}`.trim() || 'Unnamed'}</T>
+                <Text style={[styles.value, { color: c.text }]}>{perGame(p.points, p.games)}</Text>
+              </View>
+            ))}
+          </Card>
+        )}
+
+        {unlinked.length > 0 && (
+          <Pressable onPress={openUnlinked} accessibilityRole="button" style={styles.unlinked}>
+            <T muted style={{ flex: 1, fontSize: 14 }}>
+              {`${unlinked.length} scanned game${unlinked.length === 1 ? ' isn’t' : 's aren’t'} on your record`}
+            </T>
+            <T style={{ color: c.accent, fontFamily: fonts.bodySemiBold, fontSize: 14 }}>Sort out</T>
+          </Pressable>
+        )}
       </ScrollView>
 
       {/* Bottom bar: the scan button sits in the middle, raised. */}
       <SafeAreaView edges={['bottom']} style={[styles.bottom, { backgroundColor: c.card, borderTopColor: c.border }]}>
         <View style={styles.bottomRow}>
-          <Pressable style={styles.bottomItem} onPress={() => setTab('standings')} accessibilityRole="button">
+          <Pressable style={styles.bottomItem} onPress={() => router.push('/season')} accessibilityRole="button">
             <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={c.accent} strokeWidth={2} strokeLinecap="round">
-              <Path d="M4 6h16M4 12h16M4 18h16M9 4v16" />
+              <Path d="M4 20V10M10 20V4M16 20v-7M22 20H2" />
             </Svg>
-            <Text style={[styles.bottomLabel, { color: c.accent }]}>Standings</Text>
+            <Text style={[styles.bottomLabel, { color: c.accent }]}>Season</Text>
           </Pressable>
           <Pressable
             style={styles.bottomItem}
@@ -282,174 +388,29 @@ export default function Home() {
   );
 }
 
-const COLS = { rank: 20, w: 28, l: 30, pct: 46, gb: 32, l10: 42, strk: 40 };
-
-function StandingsTable({
-  rows,
-  colors,
-  onTeam,
-  gameCount,
-}: {
-  rows: StandingRow[];
-  colors: Record<string, string>;
-  onTeam: (key: string) => void;
-  gameCount: number;
-}) {
+function ResultRow({ result, onDelete }: { result: MyResult; onDelete: () => void }) {
   const c = useColors();
-  if (!rows.length) {
-    return (
-      <Card>
-        <T style={base.h2}>No standings yet</T>
-        <T muted>
-          Scan a game and the table builds itself: every team you keep the book for, with wins, losses, the last 10 and
-          streaks.
-        </T>
-        <Button title="Scan a game" onPress={() => router.push('/scan')} />
-      </Card>
-    );
-  }
-  const head = (label: string, width: number) => (
-    <Text style={[styles.th, { width, color: c.muted }]}>{label}</Text>
-  );
-  const num = (v: string | number, width: number, color = c.text, bold = false) => (
-    <Text style={[styles.td, { width, color, fontFamily: bold ? fonts.monoBold : fonts.mono }]}>{v}</Text>
-  );
-  return (
-    <View style={{ gap: space.sm }}>
-      <View style={[styles.table, { backgroundColor: c.card, borderColor: c.border }]}>
-        <View style={[styles.tr, styles.thRow, { borderBottomColor: c.text }]}>
-          <Text style={{ width: COLS.rank }} />
-          <Text style={[styles.th, { flex: 1, textAlign: 'left', color: c.muted }]}>TEAM</Text>
-          {head('W', COLS.w)}
-          {head('L', COLS.l)}
-          {head('PCT', COLS.pct)}
-          {head('GB', COLS.gb)}
-          {head('L10', COLS.l10)}
-          {head('STRK', COLS.strk)}
-        </View>
-        {rows.map((r, i) => {
-          const l10w = r.lastTen.filter((x) => x === 'W').length;
-          return (
-            <Pressable
-              key={r.key}
-              onPress={() => onTeam(r.key)}
-              accessibilityRole="button"
-              accessibilityLabel={`${i + 1}. ${r.name}, ${r.wins} wins, ${r.losses} losses, last 10 ${l10w} and ${r.lastTen.length - l10w}, streak ${r.streak ? `${r.streak.kind === 'W' ? 'won' : 'lost'} ${r.streak.count}` : 'none'}`}
-              style={({ pressed }) => [
-                styles.tr,
-                { minHeight: 52, backgroundColor: pressed ? c.sunken : 'transparent' },
-                i < rows.length - 1 && { borderBottomWidth: 1, borderBottomColor: c.sunken },
-              ]}>
-              <Text style={[styles.td, { width: COLS.rank, textAlign: 'left', color: c.muted }]}>{i + 1}</Text>
-              <View style={[base.row, { flex: 1, minWidth: 0 }]}>
-                <TeamBadge name={r.name} color={colors[r.key] ?? c.muted} />
-                <Text numberOfLines={1} style={{ flex: 1, fontFamily: fonts.bodySemiBold, fontSize: 15, color: c.text }}>
-                  {r.name}
-                </Text>
-              </View>
-              {num(r.wins, COLS.w, c.text, true)}
-              {num(r.losses, COLS.l)}
-              {num(formatPct(r.pct), COLS.pct, c.muted)}
-              {num(formatGamesBehind(r.gamesBehind), COLS.gb, c.muted)}
-              {num(`${l10w}-${r.lastTen.length - l10w}`, COLS.l10)}
-              {num(r.streak ? `${r.streak.kind}${r.streak.count}` : '–', COLS.strk, r.streak?.kind === 'L' ? c.error : c.ok, true)}
-            </Pressable>
-          );
-        })}
-      </View>
-      <T muted style={[base.small, { paddingHorizontal: space.xs }]}>
-        {`From ${gameCount} game${gameCount === 1 ? '' : 's'} you scanned. Tap a team for its games, players and stats.`}
-      </T>
-    </View>
-  );
-}
-
-function Scores({ games, onDelete }: { games: Game[]; onDelete: (g: Game) => void }) {
-  if (!games.length) return <T muted>No games yet. Scan a scorebook page to get started.</T>;
-  return (
-    <View style={{ gap: space.sm + 2 }}>
-      <T muted style={base.small}>Press and hold a game to delete it.</T>
-      {games.map((g) => (
-        <GameRow key={g.id} game={g} onDelete={() => onDelete(g)} />
-      ))}
-    </View>
-  );
-}
-
-function Leaders({ games, colors, onTeam }: { games: Game[]; colors: Record<string, string>; onTeam: (key: string) => void }) {
-  const c = useColors();
-  const lines = useMemo(() => seasonTotals(games).slice(0, 15), [games]);
-  if (!lines.length) return <T muted>Leaders appear once you have scanned a game.</T>;
-  return (
-    <View style={[styles.table, { backgroundColor: c.card, borderColor: c.border }]}>
-      <View style={[styles.tr, styles.thRow, { borderBottomColor: c.text }]}>
-        <Text style={[styles.th, { flex: 1, textAlign: 'left', color: c.muted }]}>POINTS PER GAME</Text>
-        <Text style={[styles.th, { width: 30, color: c.muted }]}>GP</Text>
-        <Text style={[styles.th, { width: 48, color: c.text }]}>PPG</Text>
-      </View>
-      {lines.map((p, i) => (
-        <Pressable
-          key={p.key}
-          onPress={() => onTeam(teamKey(p.team))}
-          accessibilityRole="button"
-          style={({ pressed }) => [
-            styles.tr,
-            { minHeight: 50, backgroundColor: pressed ? c.sunken : 'transparent' },
-            i < lines.length - 1 && { borderBottomWidth: 1, borderBottomColor: c.sunken },
-          ]}>
-          <Text style={[styles.td, { width: 22, textAlign: 'left', color: c.muted }]}>{i + 1}</Text>
-          <View style={[base.row, { flex: 1, minWidth: 0 }]}>
-            <TeamBadge name={p.team} color={colors[teamKey(p.team)] ?? c.muted} size={22} />
-            <View style={{ flex: 1 }}>
-              <Text numberOfLines={1} style={{ fontFamily: fonts.bodySemiBold, fontSize: 15, color: c.text }}>
-                {`${p.number ? `#${p.number} ` : ''}${p.name ?? 'Unnamed'}`}
-              </Text>
-              <Text style={{ fontFamily: fonts.body, fontSize: 12, color: c.muted }}>{p.team}</Text>
-            </View>
-          </View>
-          <Text style={[styles.td, { width: 30, color: c.muted }]}>{p.games}</Text>
-          <Text style={[styles.td, { width: 48, fontFamily: fonts.monoBold, color: c.text }]}>{perGame(p.points, p.games)}</Text>
-        </Pressable>
-      ))}
-    </View>
-  );
-}
-
-function GameRow({ game, onDelete }: { game: Game; onDelete: () => void }) {
-  const issues = validateGame(game);
-  const errors = issues.filter((i) => i.severity === 'error').length;
-  // Only one team's page was read and the other team's score isn't in yet.
-  const waiting = teamScore(game.home) === null || teamScore(game.away) === null;
+  const { game, us, them, opponent, outcome } = result;
+  const issues = validateGame(game).length;
+  const tone = outcome === 'W' ? c.ok : outcome === 'L' ? c.error : c.muted;
   return (
     <Pressable
       onPress={() => router.push({ pathname: '/game/[id]', params: { id: game.id } })}
       onLongPress={onDelete}
       accessibilityRole="button"
-      accessibilityHint="Press and hold to delete"
-      accessibilityActions={[{ name: 'delete', label: 'Delete game' }]}
-      onAccessibilityAction={(e) => e.nativeEvent.actionName === 'delete' && onDelete()}>
-      <Card style={styles.gameRow}>
-        <View style={{ flex: 1, gap: 4 }}>
-          <T style={{ fontFamily: fonts.bodySemiBold, fontSize: 16 }}>
-            {game.away.name ?? 'Away'} @ {game.home.name ?? 'Home'}
-          </T>
-          <T muted style={base.small}>{game.date ?? 'No date'}</T>
+      accessibilityLabel={`${outcome === 'W' ? 'Win' : outcome === 'L' ? 'Loss' : outcome === 'T' ? 'Tie' : 'Game'} against ${opponent ?? 'opponent'}`}
+      style={({ pressed }) => [styles.result, { borderTopColor: c.border, backgroundColor: pressed ? c.sunken : 'transparent' }]}>
+      <View style={[styles.outcome, { backgroundColor: outcome ? tone : c.sunken }]}>
+        <Text style={{ color: outcome ? '#fff' : c.muted, fontFamily: fonts.bodyBold, fontSize: 15 }}>{outcome ?? '–'}</Text>
+      </View>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text numberOfLines={1} style={{ fontSize: 16, fontFamily: fonts.bodySemiBold, color: c.text }}>{`vs ${opponent ?? 'Opponent'}`}</Text>
+        <View style={[base.row, { gap: 6 }]}>
+          <T muted style={{ fontSize: 13 }}>{`${game.date ?? 'No date'}${game.mine ? ` · ${game.mine}` : ''}`}</T>
+          {them === null ? <Badge tone="waiting" label="Waiting for score" /> : issues > 0 ? <Badge tone="warn" label={`${issues} to check`} /> : null}
         </View>
-        <View style={{ alignItems: 'flex-end', gap: 4 }}>
-          <T style={[base.num, { fontSize: 17 }]}>
-            {teamScore(game.away) ?? '–'}–{teamScore(game.home) ?? '–'}
-          </T>
-          {errors > 0 ? (
-            <Badge tone="error" label={`${errors} error${errors === 1 ? '' : 's'}`} />
-          ) : issues.length > 0 ? (
-            <Badge tone="warn" label={`${issues.length} to check`} />
-          ) : waiting ? (
-            <Badge tone="waiting" label="Waiting for scores" />
-          ) : (
-            <Badge tone="ok" label="Checked" />
-          )}
-        </View>
-      </Card>
+      </View>
+      <Text style={[styles.value, { color: c.text, fontSize: 17 }]}>{us !== null && them !== null ? `${us}–${them}` : us !== null ? String(us) : ''}</Text>
     </Pressable>
   );
 }
@@ -462,12 +423,19 @@ const styles = StyleSheet.create({
   subtitle: { fontFamily: fonts.body, fontSize: 12.5, opacity: 0.75 },
   iconButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   strip: { flexDirection: 'row', alignItems: 'center', gap: space.sm, borderLeftWidth: 4, borderRadius: 4, paddingHorizontal: space.md, minHeight: 44 },
-  table: { borderWidth: 1, borderRadius: 8, overflow: 'hidden' },
-  tr: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, gap: 2 },
-  thRow: { minHeight: 34, borderBottomWidth: 2 },
-  th: { fontFamily: fonts.monoBold, fontSize: 11, textAlign: 'right' },
-  td: { fontFamily: fonts.mono, fontSize: 14, textAlign: 'right' },
-  gameRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14 },
+  tiles: { flexDirection: 'row', gap: space.sm },
+  tile: { flex: 1, gap: 2 },
+  tileLabel: { fontSize: 13 },
+  tileValue: { fontFamily: fonts.monoBold, fontSize: 32, lineHeight: 38 },
+  tileNote: { fontSize: 13, fontFamily: fonts.bodySemiBold },
+  list: { padding: 0, gap: 0, overflow: 'hidden' },
+  listHead: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, minHeight: 44 },
+  result: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: 1, minHeight: 60 },
+  outcome: { width: 32, height: 32, borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
+  leader: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, minHeight: 44, borderTopWidth: 1 },
+  rank: { width: 16, fontFamily: fonts.monoBold, fontSize: 13 },
+  value: { fontFamily: fonts.monoBold, fontSize: 15 },
+  unlinked: { flexDirection: 'row', alignItems: 'center', gap: space.sm, minHeight: 44 },
   bottom: { position: 'absolute', left: 0, right: 0, bottom: 0, borderTopWidth: 1 },
   bottomRow: { flexDirection: 'row', height: 64, alignItems: 'flex-end', paddingBottom: 6 },
   bottomItem: { flex: 1, alignItems: 'center', gap: 2, minHeight: 48, justifyContent: 'flex-end' },

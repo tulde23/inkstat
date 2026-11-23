@@ -1,6 +1,13 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
-import { fromLegacyLayout, migrateTemplate, type Game, type LegacyScorebookLayout, type ScorebookTemplate } from '@inkstat/basketball';
+import {
+  fromLegacyLayout,
+  migrateTemplate,
+  type Game,
+  type LegacyScorebookLayout,
+  type MyTeam,
+  type ScorebookTemplate,
+} from '@inkstat/basketball';
 
 export const DB_NAME = 'inkstat.db';
 
@@ -207,4 +214,47 @@ export async function getActiveTemplate(db: SQLiteDatabase): Promise<ScorebookTe
 export async function setActiveTemplate(db: SQLiteDatabase, id: string | null): Promise<void> {
   if (id) await setSetting(db, ACTIVE_TEMPLATE_KEY, id);
   else await clearSetting(db, ACTIVE_TEMPLATE_KEY);
+}
+
+// ---------------------------------------------------------------- teams
+
+const TEAMS_KEY = 'teams.basketball';
+const CURRENT_TEAM_KEY = 'teams.basketball.current';
+
+/** Your teams, oldest first. Kept on this phone. */
+export async function listTeams(db: SQLiteDatabase): Promise<MyTeam[]> {
+  try {
+    const raw = await getSetting(db, TEAMS_KEY);
+    return raw ? (JSON.parse(raw) as MyTeam[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveTeam(db: SQLiteDatabase, team: MyTeam): Promise<void> {
+  const list = await listTeams(db);
+  const at = list.findIndex((t) => t.id === team.id);
+  if (at >= 0) list[at] = team;
+  else list.push(team);
+  await setSetting(db, TEAMS_KEY, JSON.stringify(list));
+}
+
+/** The team on the home screen: the chosen one, else the first. */
+export async function currentTeam(db: SQLiteDatabase): Promise<MyTeam | null> {
+  const list = await listTeams(db);
+  const id = await getSetting(db, CURRENT_TEAM_KEY);
+  return list.find((t) => t.id === id) ?? list[0] ?? null;
+}
+
+export async function setCurrentTeam(db: SQLiteDatabase, id: string): Promise<void> {
+  await setSetting(db, CURRENT_TEAM_KEY, id);
+}
+
+/** Removes a team and deletes its games (queued for sync like any other delete). */
+export async function deleteTeam(db: SQLiteDatabase, id: string): Promise<void> {
+  const games = (await listGames(db)).filter((g) => g.teamId === id);
+  for (const g of games) await deleteGame(db, g.id);
+  const list = (await listTeams(db)).filter((t) => t.id !== id);
+  await setSetting(db, TEAMS_KEY, JSON.stringify(list));
+  if ((await getSetting(db, CURRENT_TEAM_KEY)) === id) await clearSetting(db, CURRENT_TEAM_KEY);
 }

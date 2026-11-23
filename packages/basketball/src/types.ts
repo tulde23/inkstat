@@ -49,6 +49,10 @@ export interface Game {
   modelId: string | null;
   createdAt: number;
   updatedAt: number;
+  /** The team this game belongs to (a MyTeam id); missing on games scanned before teams. */
+  teamId?: string | null;
+  /** Which side is that team. */
+  mine?: Side | null;
 }
 
 export type Side = 'home' | 'away';

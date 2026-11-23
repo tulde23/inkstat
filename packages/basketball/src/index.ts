@@ -4,6 +4,24 @@ export { dropFinalFromPeriods, isPlayerName, mergePlayers, normalizeDate, perPer
 export { DEFAULT_RULES, teamScore, validateGame, validateTeam, type ValidationRules, wasRead } from './validate';
 export { pct, perGame, seasonFor, seasonTotals, teamNames, type SeasonLine } from './stats';
 export { formatGamesBehind, formatPct, gameResults, standings, teamKey, type StandingRow, type TeamResult } from './standings';
+export {
+  assignGame,
+  claimGames,
+  findMySide,
+  isMyTeamName,
+  learnName,
+  myPlayers,
+  myResult,
+  nameKey,
+  opponentScore,
+  other,
+  sheetNames,
+  teamSeason,
+  type MyResult,
+  type MyTeam,
+  type Outcome,
+  type TeamSeason,
+} from './myteam';
 export { gameToCsv, gameToJson, seasonToCsv } from './export';
 export {
   DEFAULT_ENABLED,

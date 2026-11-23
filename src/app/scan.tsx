@@ -8,7 +8,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ActivityIndicator, Image, Platform, Pressable, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
 import Svg, { Circle, Path } from 'react-native-svg';
 
-import { READ_IN_PROGRESS_KEY, clearSetting, listTemplates, saveGame, setSetting } from '@/db';
+import { READ_IN_PROGRESS_KEY, clearSetting, currentTeam, listTemplates, saveGame, saveTeam, setSetting } from '@/db';
 import {
   SCOREBOOK_PAGE_TEMPLATE,
   LIBRARY,
@@ -20,6 +20,11 @@ import {
   emptyTeam,
   normalizeDate,
   today,
+  assignGame,
+  findMySide,
+  learnName,
+  opponentScore,
+  other,
   readPage,
   seasonFor,
   type Game,
@@ -306,7 +311,20 @@ export default function Scan() {
         createdAt: now,
         updatedAt: now,
       };
-      await saveGame(db, game);
+      // Whose game is it? Sure from the names (or the only page read): assign and learn the
+      // name it was written under. Otherwise, or with no opponent score, ask after the notices.
+      const team = await currentTeam(db);
+      let ask = true;
+      let saved = game;
+      if (team) {
+        const found = findMySide(game, team);
+        if ('side' in found) {
+          saved = assignGame(game, team, found.side);
+          if (found.learn) await saveTeam(db, learnName(team, found.learn));
+          ask = opponentScore(saved[other(found.side)]) === null;
+        }
+      }
+      await saveGame(db, saved);
 
       const failures = sides.flatMap((s) => readings[s]!.failures.map((f) => `${s}: ${f}`));
       const notes = sides.flatMap((s) => readings[s]!.notes.map((n) => `${s}: ${n}`));
@@ -318,7 +336,7 @@ export default function Scan() {
       } else if (notes.length) {
         void dialog.notice('Adjusted while reading', notes.join('\n'));
       }
-      router.replace({ pathname: '/game/[id]', params: { id } });
+      router.replace(team && ask ? { pathname: '/game/whose', params: { id } } : { pathname: '/game/[id]', params: { id } });
     } catch (e) {
       if (!signal.aborted) void dialog.notice('Reading failed', e instanceof Error ? e.message : String(e));
     } finally {

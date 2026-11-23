@@ -42,6 +42,8 @@ export const gameSchema = z.object({
   modelId: text(80),
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),
+  teamId: z.string().max(80).nullish(),
+  mine: z.enum(['home', 'away']).nullish(),
 });
 
 // Compile-time guard: the wire schema and the shared Game type must not drift apart.

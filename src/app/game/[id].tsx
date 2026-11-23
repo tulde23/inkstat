@@ -5,7 +5,7 @@ import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 
 import { clearTombstone, deleteGame, saveGame } from '@/db';
-import { gameToCsv, gameToJson, teamScore, validateGame, wasRead, type Game, type Side } from '@inkstat/basketball';
+import { gameToCsv, gameToJson, myResult, other, teamScore, validateGame, wasRead, type Game, type Side } from '@inkstat/basketball';
 import { deleteGameImages, shareText } from '@/lib/files';
 import { sideName, useGame } from '@/lib/useGame';
 import { T } from '@/ui/components';
@@ -93,6 +93,7 @@ export default function GameSummary() {
   })();
   const when = [formatDate(game.date), game.location].filter(Boolean).join(' · ');
   // A side whose page wasn't read and whose score isn't in yet: the other scorekeeper's scan, or a typed score, fills it.
+  const outcome = myResult(game)?.outcome ?? null;
   const waitingFor = SIDES.find((s) => !wasRead(game[s]) && teamScore(game[s]) === null) ?? null;
 
   return (
@@ -116,9 +117,11 @@ export default function GameSummary() {
             <Pressable onPress={() => setEditing(true)} accessibilityRole="button" accessibilityHint="Edit date and place" style={{ flex: 1 }}>
               <T muted style={{ fontSize: 13 }}>{when || 'Add date and place'}</T>
             </Pressable>
-            <T muted style={{ fontSize: 13, fontFamily: fonts.bodyBold, letterSpacing: 0.6 }}>FINAL</T>
+            <T style={{ fontSize: 13, fontFamily: fonts.bodyBold, letterSpacing: 0.6, color: outcome === 'W' ? c.ok : outcome === 'L' ? c.error : c.muted }}>
+              {outcome === 'W' ? 'WIN' : outcome === 'L' ? 'LOSS' : outcome === 'T' ? 'TIE' : 'FINAL'}
+            </T>
           </View>
-          {SIDES.map((s, i) => (
+          {(game.mine ? [game.mine, other(game.mine)] : SIDES).map((s, i) => (
             <View key={s}>
               {i === 1 && <View style={{ height: 1, backgroundColor: c.border, marginBottom: 8 }} />}
               <View style={styles.teamLine}>
@@ -138,11 +141,24 @@ export default function GameSummary() {
           ))}
         </View>
 
+        {!game.mine && (
+          <View style={[styles.flag, { backgroundColor: c.sunken }]}>
+            <T style={{ fontSize: 16, fontFamily: fonts.bodyBold }}>Not on your record</T>
+            <T style={{ fontSize: 14, lineHeight: 20 }}>Say which team is yours and this game counts toward your record and leaders.</T>
+            <Pressable
+              onPress={() => router.push({ pathname: '/game/whose', params: { id: game.id } })}
+              accessibilityRole="button"
+              style={[styles.smallButton, { borderWidth: 1.5, borderColor: c.accent }]}>
+              <T style={{ color: c.accent, fontFamily: fonts.bodySemiBold, fontSize: 15 }}>Which team is yours?</T>
+            </Pressable>
+          </View>
+        )}
+
         {waitingFor && (
           <View style={[styles.flag, { backgroundColor: c.sunken }]}>
             <T style={{ fontSize: 16, fontFamily: fonts.bodyBold }}>Waiting for scores</T>
             <T style={{ fontSize: 14, lineHeight: 20 }}>
-              {`Only one team’s page was read. ${game[waitingFor].name ? `${game[waitingFor].name}’s` : 'The other team’s'} score fills in when their scorekeeper scans their page, or you can add it.`}
+              {`Only one team’s page was read. Add ${game[waitingFor].name ? `${game[waitingFor].name}’s` : 'the other team’s'} final score to count the win or loss.`}
             </T>
             <Pressable
               onPress={() => router.push({ pathname: '/game/box', params: { id: game.id, side: waitingFor, edit: 'team' } })}
