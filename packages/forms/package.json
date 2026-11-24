@@ -1,0 +1,12 @@
+{
+  "name": "@inkstat/forms",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Any paper form: a template lists its fields, tables and checks; one reader turns a photo into data; exports to JSON, CSV and YAML.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "@inkstat/ocr-engine": "*"
+  }
+}
