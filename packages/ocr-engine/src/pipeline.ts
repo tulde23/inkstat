@@ -156,7 +156,7 @@ export async function runTemplate(
       ? job.region.pieces.map((p) => p.rect)
       : layout === 'full'
         ? [job.rect]
-        : job.region.columns!.map((c) => columnSlice(c, job.region.rect, job.rect));
+        : job.region.columns!.map((c) => columnSlice(c, job.region.rect, job.rect, job.region.slope));
     let imageUris: string[] = [];
     for (const slice of slices) {
       imageUris.push(await images.crop(sourceUri, toPixels(slice, width, height), maxSide));

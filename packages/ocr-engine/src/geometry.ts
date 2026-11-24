@@ -38,17 +38,25 @@ export function tileRects(rect: NormRect, tiles?: TileSpec, rowsOverride?: numbe
  * the page, so each strip takes the stretch of it that strip crosses (a little wider
  * than the column, by how far it leans within the strip). Strips are a few rows tall,
  * so the crops follow the lean closely without warping the image.
+ *
+ * On a turned photo the rows also slope: `slope` is how far a row drops per unit
+ * across the page, and each column's slice is moved down by how far right of the
+ * region's left edge it is, so a row's cells stay in the same strip across the table.
  */
 export function columnSlice(
   column: { x: number; w: number; lean?: number },
-  region: Pick<NormRect, 'y' | 'h'>,
+  region: Pick<NormRect, 'y' | 'h'> & { x?: number },
   strip: Pick<NormRect, 'y' | 'h'>,
+  slope = 0,
 ): NormRect {
   const lean = column.lean ?? 0;
   const at = (y: number) => column.x + lean * clamp01((y - region.y) / Math.max(1e-6, region.h));
   const a = at(strip.y);
   const b = at(strip.y + strip.h);
-  return { x: Math.min(a, b), y: strip.y, w: column.w + Math.abs(b - a), h: strip.h };
+  const x = Math.min(a, b);
+  const w = column.w + Math.abs(b - a);
+  const dy = slope ? slope * (x + w / 2 - (region.x ?? 0)) : 0;
+  return { x, y: strip.y + dy, w, h: strip.h };
 }
 
 /** Map a normalized rect onto an image, clamped to its bounds and at least 1px. */

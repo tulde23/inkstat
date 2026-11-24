@@ -104,6 +104,12 @@ export interface RegionSpec {
    */
   joinColumns?: boolean;
   /**
+   * Rows that slope on a turned photo: how far a row drops per unit across the page.
+   * Each column slice is cropped at its own height (see columnSlice), so a row's cells
+   * land in the same strip.
+   */
+  slope?: number;
+  /**
    * Separate small boxes read in ONE request (e.g. team name, coach and date in a
    * page header): each is cropped, then they are joined side by side, left to right
    * in this order. Overrides `rect` for cropping; never tiled. Without native

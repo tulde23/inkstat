@@ -55,21 +55,13 @@ export default function RootLayout() {
           contentStyle: { backgroundColor: c.bg },
         }}>
         <Stack.Screen name="index" options={{ headerShown: false }} />
-        <Stack.Screen name="scan" options={{ title: 'Scan a game' }} />
+        <Stack.Screen name="scan" options={{ title: 'Scan a form' }} />
+        <Stack.Screen name="read/[id]" options={{ title: 'Form' }} />
+        <Stack.Screen name="templates" options={{ title: 'Form templates' }} />
+        <Stack.Screen name="template/[id]" options={{ title: 'Template' }} />
+        <Stack.Screen name="builder" options={{ title: 'Build a template' }} />
         <Stack.Screen name="models" options={{ title: 'Reading model' }} />
-        <Stack.Screen name="season" options={{ title: 'Season' }} />
         <Stack.Screen name="account" options={{ title: 'Account' }} />
-        <Stack.Screen name="team-setup" options={{ title: 'Your team', headerShown: false }} />
-        <Stack.Screen name="team-edit" options={{ title: 'Team' }} />
-        <Stack.Screen name="game/whose" options={{ title: 'Your team' }} />
-        <Stack.Screen name="join/[code]" options={{ title: 'Join a group' }} />
-        <Stack.Screen name="templates" options={{ title: 'Scorebook templates' }} />
-        <Stack.Screen name="template-editor" options={{ title: 'Template' }} />
-        <Stack.Screen name="bench" options={{ title: 'Test bench' }} />
-        <Stack.Screen name="team/[key]" options={{ headerShown: false }} />
-        <Stack.Screen name="game/[id]" options={{ title: 'Game' }} />
-        <Stack.Screen name="game/box" options={{ title: 'Box score' }} />
-        <Stack.Screen name="game/check" options={{ title: 'Check', presentation: 'modal', headerShown: false }} />
       </Stack>
       </DialogProvider>
     </SQLiteProvider>
