@@ -1,0 +1,27 @@
+# What Fluxon knows about InkStat: its app, its store ids, and where its keys are kept.
+# "fluxon project" checks this file and "fluxon keys" checks the keys. Secrets are only
+# ever referred to (keylo:, env:, file:), never written here. What differs between
+# developers, such as where the checkout is on the Mac, is kept by Fluxon on each PC.
+fluxon: 1
+name: InkStat
+
+apps:
+  inkstat:
+    framework: expo
+    root: .
+    android:
+      id: com.inkstat.app
+      # No upload key yet: release builds are signed with the debug key. Once there is one,
+      # "fluxon keys import --only android" saves it to Keylo and fills these in.
+      # signing: keylo:inkstat/android-signing
+      # play: { key: keylo:inkstat/play, track: internal }
+    ios:
+      scheme: InkStat
+      id: com.inkstat.app
+      team: 8R4JRSZ8KB
+      # An App Store Connect key belongs to the team, so the one Orbit uses can serve here too.
+      # appStore: keylo:<name>
+
+versions:
+  marketing: app.json#expo.version
+  numbers: store
