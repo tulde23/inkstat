@@ -3,29 +3,23 @@ import type { ExtractionRun, RegionResult } from '@inkstat/ocr-engine';
 import { LIBRARY, readForm, runChecks } from '../index';
 
 /**
- * Real answers from Gemini Nano on a Pixel, reading the cooling-log sample
- * (2026-11-24). Every reading was right, but the model ran the three food names
- * together in two narrow columns, left the names off in the 6-hour column, and
- * copied the printed "Food product" heading from an empty strip.
+ * The ways Gemini Nano went wrong reading the cooling-log sample on a Pixel
+ * (2026-11-24): it ran the three food names together in a pass whose column held
+ * the same value on every row, left the names off beside some readings, and
+ * copied the printed "Food product" heading from an empty strip. The readings it
+ * gave were all right. These answers keep those habits, in the paired passes the
+ * template reads in now.
  */
 const ANSWERS: [string, number, string][] = [
   ['field_verifiedBy', 0, '{ "value": null }'],
   ['field_verifiedDate', 0, '{ "value": "11/20/26" }'],
   ['field_correctiveActions', 0, '{ "value": "Rice 72F at 2 hrs - moved to ice bath" }'],
-  ['table_cooling_date', 0, '{ "rows": [ { "_key": "Chili Rice Turkey stock", "date": "11/20/26" } ] }'],
-  ['table_cooling_date', 1, '{ "rows": [ { "_key": null, "date": null } ] }'],
-  ['table_cooling_start', 0, '{ "rows": [ { "_key": "Chili", "start": "1:30/135" }, { "_key": "Rice", "start": "7:00/140" }, { "_key": "Turkey stock", "start": "2:00/150" } ] }'],
-  ['table_cooling_start', 1, '{ "rows": [ { "_key": "Food product", "start": null } ] }'],
-  ['table_cooling_h1', 0, '{ "rows": [ { "_key": "Chili", "h1": "2:30/102" }, { "_key": "Rice", "h1": "7:55/104" }, { "_key": "Turkey stock", "h1": "2:50/110" } ] }'],
-  ['table_cooling_h1', 1, '{ "rows": [ { "_key": "Food product", "h1": null } ] }'],
-  ['table_cooling_h2', 0, '{ "rows": [ { "_key": "Chili", "h2": "3:20/68" }, { "_key": "Rice", "h2": "8:50/72" }, { "_key": "Turkey stock", "h2": "3:40/69" } ] }'],
-  ['table_cooling_h2', 1, '{ "rows": [ { "_key": null, "h2": null }, { "_key": null, "h2": null } ] }'],
-  ['table_cooling_h3', 0, '{ "rows": [ { "_key": "Chili", "h3": "4:15/56" }, { "_key": "Rice", "h3": "9:45/60" }, { "_key": "Turkey stock", "h3": "4:30/58" } ] }'],
-  ['table_cooling_h4', 0, '{ "rows": [ { "_key": "Chili", "h4": "5:10/47" }, { "_key": "Rice", "h4": "10:40/50" }, { "_key": "Turkey stock", "h4": "5:20/48" } ] }'],
-  ['table_cooling_h5', 0, '{ "rows": [ { "_key": "Chili", "h5": "6:05/42" }, { "_key": "Rice", "h5": "11:30/44" }, { "_key": "Turkey stock", "h5": "6:10/41" } ] }'],
-  ['table_cooling_h5', 1, '{ "rows": [ { "_key": "Food product", "h5": null } ] }'],
-  ['table_cooling_h6', 0, '{ "rows": [ { "_key": "Chili", "h6": null }, { "_key": "Rice", "h6": null }, { "_key": "Turkey stock", "h6": null }, { "_key": null, "h6": "7:00/39" }, { "_key": null, "h6": "12:20/40" } ] }'],
-  ['table_cooling_monitoredBy', 0, '{ "rows": [ { "_key": "Chili Rice Turkey stock", "monitoredBy": "AK MR" } ] }'],
+  ['table_cooling_date', 0, '{ "rows": [ { "_key": "Chili", "date": "11/20/26", "start": "1:30/135" }, { "_key": "Rice", "date": "11/20/26", "start": "7:00/140" }, { "_key": "Turkey stock", "date": "11/20/26", "start": "2:00/150" } ] }'],
+  ['table_cooling_date', 1, '{ "rows": [ { "_key": "Food product", "date": null, "start": null } ] }'],
+  ['table_cooling_h1', 0, '{ "rows": [ { "_key": "Chili", "h1": "2:30/102", "h2": "3:20/68" }, { "_key": "Rice", "h1": "7:55/104", "h2": "8:50/72" }, { "_key": "Turkey stock", "h1": "2:50/110", "h2": "3:40/69" } ] }'],
+  ['table_cooling_h1', 1, '{ "rows": [ { "_key": null, "h1": null, "h2": null } ] }'],
+  ['table_cooling_h3', 0, '{ "rows": [ { "_key": "Chili", "h3": "4:15/56", "h4": "5:10/47" }, { "_key": "Rice", "h3": "9:45/60", "h4": "10:40/50" }, { "_key": "Turkey stock", "h3": "4:30/58", "h4": "5:20/48" } ] }'],
+  ['table_cooling_h5', 0, '{ "rows": [ { "_key": "Chili Rice Turkey stock", "h5": "6:05/42", "h6": null, "monitoredBy": "AK MR" }, { "_key": null, "h5": "11:30/44", "h6": "7:00/39", "monitoredBy": null }, { "_key": null, "h5": "6:10/41", "h6": "12:20/40", "monitoredBy": null } ] }'],
 ];
 
 const result = ([regionId, tileIndex, json]: [string, number, string]): RegionResult => ({
@@ -44,7 +38,7 @@ const result = ([regionId, tileIndex, json]: [string, number, string]): RegionRe
 
 const run: ExtractionRun = { templateId: 'form.mn-cooling-log', templateVersion: 1, modelId: 'gemini-nano', sourceUri: 'photo.jpg', results: ANSWERS.map(result), startedAt: 0, finishedAt: 38000 };
 
-describe('a real Gemini Nano read of the cooling log', () => {
+describe('a Gemini Nano read of the cooling log, with its habits', () => {
   const t = LIBRARY.find((x) => x.id === 'mn-cooling-log')!;
   const data = readForm(t, run, 0);
   const rows = data.tables.cooling;
@@ -53,20 +47,27 @@ describe('a real Gemini Nano read of the cooling log', () => {
     expect(rows.map((r) => r.food)).toEqual(['Chili', 'Rice', 'Turkey stock']);
   });
 
-  it('puts every reading on its own food’s row', () => {
+  it('puts every reading on its own food’s row, and a repeated date on each', () => {
+    expect(rows.map((r) => r.date)).toEqual(['2026-11-20', '2026-11-20', '2026-11-20']);
     expect(rows.map((r) => r.h2)).toEqual([
       { time: '03:20', temp: 68 },
       { time: '08:50', temp: 72 },
       { time: '03:40', temp: 69 },
     ]);
-    // The 6-hour values came without names: placed top to bottom, and said so.
-    expect(rows.map((r) => r.h6)).toEqual([{ time: '07:00', temp: 39 }, { time: '12:20', temp: 40 }, null]);
-    expect(data.issues).toContain('Cooling log Less than 6 hours: matched to rows by position (the food product wasn’t read beside it)'.replace('’', "'"));
   });
 
-  it('leaves run-together values out rather than guessing their row', () => {
-    expect(rows.map((r) => r.date)).toEqual([null, null, null]);
-    expect(data.issues.some((s) => s.includes('Date: couldn') && s.includes('11/20/26'))).toBe(true);
+  it('places a full column read without names top to bottom, and says so', () => {
+    expect(rows.map((r) => r.h5)).toEqual([
+      { time: '06:05', temp: 42 },
+      { time: '11:30', temp: 44 },
+      { time: '06:10', temp: 41 },
+    ]);
+    expect(data.issues.some((s) => s.includes('Less than 5 hours: matched to rows by position'))).toBe(true);
+  });
+
+  it('says so when it can’t tell which row a value belongs to, rather than guessing', () => {
+    expect(rows.map((r) => r.monitoredBy)).toEqual([null, null, null]);
+    expect(data.issues.some((s) => s.includes('Monitored by: couldn'))).toBe(true);
   });
 
   it('flags the rice, which was 72°F at 2 hours', () => {

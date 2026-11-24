@@ -23,35 +23,51 @@ export const rowRegion = (table: string, field: string) => `table_${table}_${fie
 
 const KEY = '_key';
 
-/** The column passes of a row table: [column, ...] per pass, the key column first when there is one. */
-export function passesOf(t: RowTable): TableColumn[][] {
+export interface Pass {
+  /** The column that tells rows apart, read beside the others; none when the table has no key. */
+  key: TableColumn | null;
+  cols: TableColumn[];
+}
+
+/**
+ * The passes a row table is read in. With a key column: the key plus two neighbouring
+ * columns at a time (a lone column whose value repeats down the page, like a date,
+ * gets its rows run together by small models; a neighbour with differing values keeps
+ * them apart). Without one: every column at once.
+ */
+export function passesOf(t: RowTable): Pass[] {
   const placed = t.columns.filter((c) => c.band);
-  const key = placed.find((c) => c.id === t.key);
-  if (!key) return placed.length ? [placed] : [];
-  return placed.filter((c) => c !== key).map((c) => [key, c]);
+  const key = placed.find((c) => c.id === t.key) ?? null;
+  if (!key) return placed.length ? [{ key: null, cols: placed }] : [];
+  const rest = placed.filter((c) => c !== key).sort((a, b) => a.band!.x - b.band!.x);
+  const groups: TableColumn[][] = [];
+  for (let i = 0; i < rest.length; i += 2) groups.push(rest.slice(i, i + 2));
+  // A last column on its own joins the group before it.
+  if (groups.length > 1 && groups[groups.length - 1].length === 1) groups[groups.length - 2].push(groups.pop()![0]);
+  return groups.map((cols) => ({ key, cols }));
 }
 
 function rowTableRegions(t: RowTable): RegionSpec[] {
   if (!t.rect) return [];
-  return passesOf(t).map((cols): RegionSpec => {
-    const keyed = cols.length === 2 && cols[0].id === t.key;
+  return passesOf(t).map(({ key, cols }): RegionSpec => {
+    const all = key ? [key, ...cols] : cols;
     const properties: Record<string, FieldSchema> = {};
-    for (const c of cols) properties[keyed && c === cols[0] ? KEY : c.id] = schemaFor(c);
-    const what = cols.map((c) => describe(c)).join('; ');
-    const id = keyed ? passRegion(t.id, cols[1].id) : passRegion(t.id, 'all');
+    for (const c of all) properties[c === key ? KEY : c.id] = schemaFor(c);
+    const what = all.map((c) => describe(c)).join('; ');
     return {
-      id,
-      label: `${t.label}: ${keyed ? cols[1].label : 'all columns'}`,
+      id: key ? passRegion(t.id, cols[0].id) : passRegion(t.id, 'all'),
+      label: `${t.label}: ${key ? cols.map((c) => c.label).join(', ') : 'all columns'}`,
       rect: t.rect!,
-      columns: cols.map((c) => ({ ...c.band!, label: c.label })).sort((a, b) => a.x - b.x),
+      columns: all.map((c) => ({ ...c.band!, label: c.label })).sort((a, b) => a.x - b.x),
       joinColumns: true,
       slope: t.slope,
       tiles: { targetAspect: 1.2, overlap: 0.1, minRows: 1, maxRows: Math.max(1, Math.ceil(t.maxRows / 3)) },
       maxImageSide: 2048,
-      maxTokens: 60 + 40 * Math.min(t.maxRows, 12) * cols.length,
+      maxTokens: 60 + 40 * Math.min(t.maxRows, 12) * all.length,
       prompt:
         `These are rows of the "${t.label}" table on a paper form, columns left to right: ${what}. ` +
-        'Give one item per filled-in row, top to bottom, with each column as written. ' +
+        'Give one item for every filled-in row, top to bottom, with each column as written on that row. ' +
+        'Keep every row separate, even when a value is the same as the row above. ' +
         'Use null for a blank cell. Skip empty rows and printed headings.',
       schema: { type: 'object', properties: { rows: { type: 'array', maxItems: t.maxRows, items: { type: 'object', properties } } } },
     };
@@ -133,7 +149,7 @@ function readRowTable(t: RowTable, run: ExtractionRun, issues: string[]): DataRo
   };
 
   const passes = passesOf(t);
-  const keyed = passes.length > 0 && passes[0].length === 2 && passes[0][0].id === t.key;
+  const keyed = passes.length > 0 && passes[0].key !== null;
 
   if (!keyed) {
     // One pass of every column: rows in reading order; overlapping strips repeat a row exactly.
@@ -162,25 +178,28 @@ function readRowTable(t: RowTable, run: ExtractionRun, issues: string[]): DataRo
   // out, or copy a printed heading as if it were a row; each is handled below.
   const printed = new Set([t.label, ...t.columns.map((c) => c.label)].map(keyOf));
   type Item = { k: string; key: unknown; raw: unknown };
-  const items = passes.map(([, col]) => {
-    const list: Item[] = [];
-    for (const tile of resultsFor(run, passRegion(t.id, col.id))) {
+  // One list of (key, value) items per column, from its pass.
+  const items = passes.flatMap(({ cols }) => {
+    const lists = cols.map((col) => ({ col, list: [] as Item[] }));
+    for (const tile of resultsFor(run, passRegion(t.id, cols[0].id))) {
       const rows = (tile.data as { rows?: Record<string, unknown>[] } | null)?.rows;
       if (!rows) {
-        issues.push(`${t.label} ${col.label}: strip ${tile.tileIndex + 1} couldn't be read`);
+        issues.push(`${t.label} ${cols.map((c) => c.label).join(', ')}: strip ${tile.tileIndex + 1} couldn't be read`);
         continue;
       }
       for (const r of rows) {
         let k = keyOf(r[KEY]);
         if (printed.has(k) || k === 'null') k = '';
-        const raw = r[col.id] ?? null;
-        if (!k && raw === null) continue;
-        // The same row again where strips overlap.
-        if (k && list.some((x) => x.k === k)) continue;
-        list.push({ k, key: r[KEY], raw });
+        for (const { col, list } of lists) {
+          const raw = r[col.id] ?? null;
+          if (!k && raw === null) continue;
+          // The same row again where strips overlap.
+          if (k && list.some((x) => x.k === k)) continue;
+          list.push({ k, key: r[KEY], raw });
+        }
       }
     }
-    return { col, list };
+    return lists;
   });
 
   // Row order: from the pass that told the most rows apart, then any rows only others saw.
@@ -214,8 +233,10 @@ function readRowTable(t: RowTable, run: ExtractionRun, issues: string[]): DataRo
     if (!loose.length) continue;
     // Values read without their row's key: top to bottom onto the rows still missing this
     // column, when that is unambiguous; otherwise say so rather than guess.
+    // A whole column's worth (one value per row still open) is unambiguous even when
+    // some keys were run together.
     const open = [...rows.values()].filter((r) => r[col.id] === null);
-    if (loose.every((x) => !x.k) && loose.length <= open.length) {
+    if ((loose.every((x) => !x.k) && loose.length <= open.length) || loose.length === open.length) {
       loose.forEach((x, i) => put(open[i], col, x.raw, `${t.label} row ${i + 1}`));
       issues.push(`${t.label} ${col.label}: matched to rows by position (the ${keyCol.label.toLowerCase()} wasn't read beside it)`);
     } else {
