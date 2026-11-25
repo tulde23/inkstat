@@ -60,6 +60,7 @@ const DOUBLE_TAP_SCALE = 2.5;
  * - A band also has a handle in the middle of its top and bottom edges: drag one
  *   sideways to make the column lean, for a tilted photo or an uneven printed column.
  * - One finger elsewhere draws a new box at 1x, and pans the page when zoomed in.
+ *   With nothing active, the new box goes to `onDraw` when the finger lifts.
  * - Two fingers pinch to zoom and pan; whatever the first finger changed is undone.
  * - Double tap zooms in on that spot, or back out.
  * Positions are reported as fractions of the page.
@@ -76,6 +77,7 @@ export function PageMarker({
   showLabels = false,
   onTapShape,
   allowDraw = true,
+  onDraw,
 }: {
   uri: string;
   /** Photo width / height. */
@@ -94,6 +96,8 @@ export function PageMarker({
   onTapShape?: (id: string) => void;
   /** One finger on empty paper draws a new box (true) or only pans when zoomed (false). */
   allowDraw?: boolean;
+  /** With nothing active, a box drawn on empty paper is handed here when the finger lifts. */
+  onDraw?: (rect: NormRect) => void;
 }) {
   // Fit the page in the viewport at 1x.
   // A margin inside the frame keeps handles on the page's own edges whole and easy to grab.
@@ -102,10 +106,12 @@ export function PageMarker({
   const fit = aspect >= iw / ih ? { w: iw, h: iw / aspect } : { w: ih * aspect, h: ih };
   const off = { x: (width - fit.w) / 2, y: (height - fit.h) / 2 };
   const [view, setView] = useState({ s: 1, tx: 0, ty: 0 });
+  // A box being drawn when nothing is active: shown while the finger is down, then given to onDraw.
+  const [draft, setDraft] = useState<NormRect | null>(null);
 
-  const latest = useRef({ view, fit, off, width, height, active, band, onChange, shapes, onTapShape, allowDraw });
+  const latest = useRef({ view, fit, off, width, height, active, band, onChange, shapes, onTapShape, allowDraw, onDraw });
   useLayoutEffect(() => {
-    latest.current = { view, fit, off, width, height, active, band, onChange, shapes, onTapShape, allowDraw };
+    latest.current = { view, fit, off, width, height, active, band, onChange, shapes, onTapShape, allowDraw, onDraw };
   });
   const mode = useRef<Mode>({ kind: 'none' });
 
@@ -135,7 +141,11 @@ export function PageMarker({
     };
 
     // The gesture's starting state: put back if a second finger turns it into a pinch.
-    const gesture = { startRect: null as NormRect | null, startLean: 0, x0: 0, y0: 0, moved: false, lastTap: 0 };
+    const gesture = { startRect: null as NormRect | null, startLean: 0, x0: 0, y0: 0, moved: false, lastTap: 0, draft: null as NormRect | null };
+    const setDrafted = (r: NormRect | null) => {
+      gesture.draft = r;
+      setDraft(r);
+    };
     // Where the viewport sits on screen, taken from the first finger of each gesture
     // (one finger's locationX is reliable); every position after that is pageX - origin.
     const origin = { x: 0, y: 0 };
@@ -146,6 +156,7 @@ export function PageMarker({
     const startZoom = (t: readonly NativeTouchEvent[]) => {
       if (gesture.moved && gesture.startRect && latest.current.onChange) emit(gesture.startRect, gesture.startLean);
       gesture.moved = true; // a pinch is never a tap
+      if (gesture.draft) setDrafted(null);
       const v = latest.current.view;
       const m = mid(t[0], t[1]);
       mode.current = { kind: 'zoom', s: v.s, tx: v.tx, ty: v.ty, d: dist(t[0], t[1]), cx: m.x, cy: m.y };
@@ -162,7 +173,8 @@ export function PageMarker({
       gesture.moved = false;
       const pan: Mode = { kind: 'pan', tx: v.tx, ty: v.ty, sx: lx(t), sy: ly(t) };
       if (!a || !latest.current.onChange) {
-        mode.current = pan;
+        const drawNew = !a && latest.current.onDraw && latest.current.allowDraw && v.s <= 1.01;
+        mode.current = drawNew ? { kind: 'draw', x0: p.x, y0: p.y } : pan;
         return;
       }
       const r = a.rect;
@@ -249,7 +261,10 @@ export function PageMarker({
           const y = Math.min(m.y0, p.y);
           const w = Math.abs(p.x - m.x0);
           const h = Math.abs(p.y - m.y0);
-          if (w > MIN_DRAW && (latest.current.band || h > MIN_DRAW)) emit({ x, y, w, h });
+          if (!latest.current.active) {
+            const r = { x: clamp(x, 0, 1), y: clamp(y, 0, 1), w: Math.min(w, 1 - clamp(x, 0, 1)), h: Math.min(h, 1 - clamp(y, 0, 1)) };
+            setDrafted(w > MIN_DRAW && h > MIN_DRAW ? r : null);
+          } else if (w > MIN_DRAW && (latest.current.band || h > MIN_DRAW)) emit({ x, y, w, h });
         } else if (m.kind === 'move') {
           const r = m.start;
           const x = clamp(r.x + p.x - m.x0, Math.max(0, -m.lean), 1 - r.w - Math.max(0, m.lean));
@@ -271,6 +286,13 @@ export function PageMarker({
         }
       },
       onPanResponderRelease: (e: GestureResponderEvent) => {
+        if (gesture.draft) {
+          const r = gesture.draft;
+          setDrafted(null);
+          mode.current = { kind: 'none' };
+          latest.current.onDraw?.(r);
+          return;
+        }
         if (!gesture.moved && mode.current.kind !== 'zoom') {
           const now = e.nativeEvent.timestamp;
           if (now - gesture.lastTap < DOUBLE_TAP_MS) {
@@ -294,6 +316,7 @@ export function PageMarker({
         mode.current = { kind: 'none' };
       },
       onPanResponderTerminate: () => {
+        if (gesture.draft) setDrafted(null);
         mode.current = { kind: 'none' };
       },
     }).panHandlers;
@@ -353,6 +376,15 @@ export function PageMarker({
             )}
           </View>
         ))}
+        {draft && (
+          <View
+            style={[
+              styles.shape,
+              px(draft),
+              { borderColor: '#FFFFFF', borderStyle: 'dashed', borderWidth: 2.5 / s, backgroundColor: 'rgba(47,93,168,0.25)', borderRadius: 3 / s },
+            ]}
+          />
+        )}
         {active && activeRect && (
           <>
             {activeLean === 0 && (

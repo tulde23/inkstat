@@ -10,10 +10,12 @@ import { namesIn, newFormTemplate, parseRule, type FieldDef, type FormTemplate, 
 
 import { getTemplate, saveTemplate } from '@/db';
 import { keepImage, newId } from '@/lib/files';
+import { allTemplates, hasSample, samplePhoto } from '@/lib/reader';
 import { Button, Card, T } from '@/ui/components';
 import { useDialog } from '@/ui/Dialog';
 import { EditSheet, type SheetField } from '@/ui/EditSheet';
 import { PageMarker, type MarkerShape } from '@/ui/PageMarker';
+import { COLUMN_COLOR as COLUMN, FIELD_COLOR as FIELD, TABLE_COLOR as TABLE, shapesOf } from '@/ui/templateShapes';
 import { base, fonts, space, useColors } from '@/ui/theme';
 
 import { recognizePageText } from '../../modules/page-text';
@@ -27,10 +29,6 @@ const KINDS: { kind: ValueKind; label: string; hint: string }[] = [
   { kind: 'checkbox', label: 'Tick box', hint: 'Ticked or not' },
   { kind: 'timeTemp', label: 'Time and temperature', hint: 'One cell like 3:20/68' },
 ];
-
-const FIELD = '#2F5DA8';
-const TABLE = '#2F6F3E';
-const COLUMN = '#C2610C';
 
 /** A value's key in the data: from its label, letters and digits, unique in the template. */
 function idFor(label: string, taken: Set<string>): string {
@@ -46,8 +44,10 @@ type Editing = { kind: 'field'; id: string } | { kind: 'rows'; table: string } |
 type Asking = { kind: 'value' } | { kind: 'table' } | { kind: 'column'; table: string } | { kind: 'name' } | { kind: 'check' } | null;
 
 /**
- * Build a template on a photo of the form: name each value and draw a box around
- * it; a table is a box around its rows and a column for each value. Checks are
+ * Build a template on a photo of the form: draw a box around a value or a table's
+ * rows and say what it is (or name a value first, then place its box); a table
+ * also gets a column for each value. A built-in can be copied here (`copy`) and
+ * changed on its sample photo. Checks are
  * rules on the values (e.g. "total == a + b"). The photo's printed words are kept
  * so InkStat recognises the form and lines it up next time.
  */
@@ -56,7 +56,7 @@ export default function Builder() {
   const c = useColors();
   const insets = useSafeAreaInsets();
   const dialog = useDialog();
-  const params = useLocalSearchParams<{ id?: string; uri?: string; name?: string; source?: string }>();
+  const params = useLocalSearchParams<{ id?: string; uri?: string; name?: string; source?: string; copy?: string }>();
   const { width: screenW, height: screenH } = useWindowDimensions();
 
   const [tpl, setTpl] = useState<FormTemplate | null>(null);
@@ -64,6 +64,10 @@ export default function Builder() {
   const [editing, setEditing] = useState<Editing>(null);
   const [asking, setAsking] = useState<Asking>(null);
   const [saving, setSaving] = useState(false);
+  /** A box drawn on the page, waiting to be named. */
+  const [drawn, setDrawn] = useState<NormRect | null>(null);
+  /** A built-in being copied when it has no sample photo: the user photographs the form first. */
+  const [seed, setSeed] = useState<FormTemplate | null>(null);
 
   const start = (photoUri: string | null, from?: FormTemplate) => {
     const now = Date.now();
@@ -86,12 +90,32 @@ export default function Builder() {
 
   useEffect(() => {
     // Loaded after the first render either way (a saved template comes from the database).
-    void (params.id ? getTemplate(db, params.id) : Promise.resolve(null)).then((t) => {
-      if (t) start(t.photoUri, t);
-      else if (params.uri) start(params.uri);
+    void (params.id ? getTemplate(db, params.id) : Promise.resolve(null)).then(async (t) => {
+      if (t) return start(t.photoUri, t);
+      if (params.copy) {
+        const from = (await allTemplates(db)).find((x) => x.id === params.copy);
+        if (!from) return;
+        const now = Date.now();
+        // Its own template beside the built-in, which stays as it is.
+        const copy: FormTemplate = {
+          ...(JSON.parse(JSON.stringify(from)) as FormTemplate),
+          id: `tpl-${newId()}`,
+          name: `${from.name} (my copy)`,
+          builtinId: undefined,
+          anchors: undefined,
+          createdAt: now,
+          updatedAt: now,
+        };
+        const sampleId = from.builtinId ?? from.id;
+        const photo = from.photoUri ?? (hasSample(sampleId) ? await samplePhoto(sampleId).catch(() => null) : null);
+        if (photo) start(photo, { ...copy, photoUri: photo });
+        else setSeed(copy);
+        return;
+      }
+      if (params.uri) start(params.uri);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [db, params.id, params.uri]);
+  }, [db, params.id, params.uri, params.copy]);
 
   useEffect(() => {
     if (tpl?.photoUri) Image.getSize(tpl.photoUri, (w, h) => setAspect(w / h), () => undefined);
@@ -101,7 +125,7 @@ export default function Builder() {
     const options: ImagePicker.ImagePickerOptions = { mediaTypes: ['images'], quality: 1, allowsEditing: Platform.OS === 'android' };
     if (source === 'camera' && !(await ImagePicker.requestCameraPermissionsAsync()).granted) return;
     const r = source === 'camera' ? await ImagePicker.launchCameraAsync(options) : await ImagePicker.launchImageLibraryAsync(options);
-    if (!r.canceled) start(r.assets[0].uri);
+    if (!r.canceled) start(r.assets[0].uri, seed ? { ...seed, photoUri: r.assets[0].uri } : undefined);
   };
 
   const taken = useMemo(
@@ -120,17 +144,17 @@ export default function Builder() {
 
   // ── Adding things ──
 
-  const addValue = (label: string) =>
+  const addValue = (label: string, rect?: NormRect | null) =>
     chooseKind((kind) => {
       const id = idFor(label, taken);
       const def: FieldDef = { id, label, kind };
-      update((t) => ({ ...t, fields: [...t.fields, { ...def, rect: { x: 0.3, y: 0.45, w: 0.4, h: 0.05 } }] }));
+      update((t) => ({ ...t, fields: [...t.fields, { ...def, rect: rect ?? { x: 0.3, y: 0.45, w: 0.4, h: 0.05 } }] }));
       setEditing({ kind: 'field', id });
     });
 
-  const addTable = (label: string, rows: number) => {
+  const addTable = (label: string, rows: number, rect?: NormRect | null) => {
     const id = idFor(label, taken);
-    const table: RowTable = { id, label, orientation: 'rows', rect: { x: 0.08, y: 0.35, w: 0.84, h: 0.4 }, columns: [], maxRows: Math.max(1, Math.min(60, rows || 10)) };
+    const table: RowTable = { id, label, orientation: 'rows', rect: rect ?? { x: 0.08, y: 0.35, w: 0.84, h: 0.4 }, columns: [], maxRows: Math.max(1, Math.min(60, rows || 10)) };
     update((t) => ({ ...t, tables: [...t.tables, table] }));
     setEditing({ kind: 'rows', table: id });
   };
@@ -196,10 +220,13 @@ export default function Builder() {
   // ── No photo yet ──
 
   if (!tpl) {
+    // Opened to copy a built-in: wait for it to load before asking for a photo.
+    if (params.copy && !seed) return <View style={[base.screen, { backgroundColor: c.bg }]} />;
+    const what = seed?.name.replace(/ \(my copy\)$/, '') ?? params.name;
     return (
       <View style={[base.screen, base.content, { backgroundColor: c.bg }]}>
         <Stack.Screen options={{ title: 'Build a template' }} />
-        <T style={styles.question}>{params.name ? `Photograph a ${params.name}` : 'Photograph the form'}</T>
+        <T style={styles.question}>{what ? `Photograph a ${what}` : 'Photograph the form'}</T>
         <T muted style={styles.lead}>Filled in is best: you’ll see where people write. Flat, in good light, the whole page in the frame.</T>
         <Button title="Take a photo" size="lg" onPress={() => void pick('camera')} />
         <Button title="Choose from Photos" kind="secondary" onPress={() => void pick('library')} />
@@ -209,17 +236,8 @@ export default function Builder() {
 
   // ── Shapes on the page ──
 
-  const shapes: MarkerShape[] = [
-    ...tpl.fields.filter((f) => f.rect).map((f) => ({ id: `f:${f.id}`, rect: f.rect!, color: FIELD, label: f.label })),
-    ...rowTables.flatMap((t) =>
-      t.rect
-        ? [
-            { id: `t:${t.id}`, rect: t.rect, color: TABLE, label: t.label },
-            ...t.columns.filter((col) => col.band).map((col) => ({ id: `c:${t.id}:${col.id}`, rect: { x: col.band!.x, y: t.rect!.y, w: col.band!.w, h: t.rect!.h }, color: COLUMN, label: col.label, lean: col.band!.lean })),
-          ]
-        : [],
-    ),
-  ];
+  const naming = !!drawn && (asking?.kind === 'value' || asking?.kind === 'table');
+  const shapes: MarkerShape[] = [...shapesOf(tpl), ...(naming ? [{ id: 'new', rect: drawn!, color: FIELD, label: 'New box' }] : [])];
   const activeId = editing?.kind === 'field' ? `f:${editing.id}` : editing?.kind === 'rows' ? `t:${editing.table}` : editing ? `c:${editing.table}:${editing.column}` : null;
   const active = shapes.find((s) => s.id === activeId) ?? null;
   const band = editing?.kind === 'column' ? (({ y, h }) => ({ y, h }))(tableOf(editing.table).rect!) : null;
@@ -233,7 +251,21 @@ export default function Builder() {
 
   const onTapShape = (id: string) => {
     const [k, a, b] = id.split(':');
-    setEditing(k === 'f' ? { kind: 'field', id: a } : k === 't' ? { kind: 'rows', table: a } : { kind: 'column', table: a, column: b });
+    // A sideways table's boxes (copied from a built-in) are shown but not changed here.
+    if (k === 'f') setEditing({ kind: 'field', id: a });
+    else if (k === 't' && rowTables.some((t) => t.id === a)) setEditing({ kind: 'rows', table: a });
+    else if (k === 'c') setEditing({ kind: 'column', table: a, column: b });
+  };
+
+  /** A box drawn with nothing selected: ask what it is. A big one is most likely a table. */
+  const onDraw = (rect: NormRect) => {
+    const name = (kind: 'value' | 'table') => () => {
+      setDrawn(rect);
+      setAsking({ kind });
+    };
+    const value = { label: 'A value', hint: 'One thing written here: a lot number, a date, a reading', onPress: name('value') };
+    const table = { label: 'A table’s rows', hint: 'Rows of the same values, one per line. Box the rows, not the headings', onPress: name('table') };
+    dialog.actions('What did you box?', rect.w > 0.4 && rect.h > 0.12 ? [table, value] : [value, table]);
   };
 
   const hint =
@@ -243,11 +275,11 @@ export default function Builder() {
         ? 'Box the table’s rows, from the first to the last. Leave out the printed headings.'
         : editing?.kind === 'column'
           ? 'Drag the column over this value’s column. If it leans, drag the white handle at its top or bottom sideways.'
-          : 'Tap a box to move it.';
+          : 'Drag on the page to box a value or a table’s rows. Tap a box to change it.';
 
   const sheet: { title: string; fields: SheetField[]; onSave: (d: Record<string, string>) => void } | null =
     asking?.kind === 'value'
-      ? { title: 'Add a value', fields: [{ key: 'label', label: 'Its label on the form', value: '', placeholder: 'Lot No.' }], onSave: (d) => d.label.trim() && addValue(d.label.trim()) }
+      ? { title: 'Add a value', fields: [{ key: 'label', label: 'Its label on the form', value: '', placeholder: 'Lot No.' }], onSave: (d) => d.label.trim() && addValue(d.label.trim(), drawn) }
       : asking?.kind === 'table'
         ? {
             title: 'Add a table',
@@ -255,7 +287,7 @@ export default function Builder() {
               { key: 'label', label: 'What the table is', value: '', placeholder: 'Cylinders', flex: 2 },
               { key: 'rows', label: 'Rows on the form', value: '10', numeric: true },
             ],
-            onSave: (d) => d.label.trim() && addTable(d.label.trim(), Number(d.rows)),
+            onSave: (d) => d.label.trim() && addTable(d.label.trim(), Number(d.rows), drawn),
           }
         : asking?.kind === 'column'
           ? { title: 'Add a column', fields: [{ key: 'label', label: 'Its heading on the form', value: '', placeholder: 'Strength' }], onSave: (d) => d.label.trim() && addColumn(asking.table, d.label.trim()) }
@@ -280,16 +312,18 @@ export default function Builder() {
           uri={tpl.photoUri}
           aspect={aspect}
           width={screenW}
-          height={Math.round(screenH * (editing ? 0.58 : 0.4))}
+          height={Math.round(screenH * (editing ? 0.58 : 0.45))}
           shapes={shapes}
           active={active}
           band={band}
           onChange={editing ? onChange : undefined}
           onTapShape={onTapShape}
           showLabels
-          allowDraw={!!editing && editing.kind !== 'column'}
+          allowDraw={editing ? editing.kind !== 'column' : true}
+          onDraw={editing ? undefined : onDraw}
         />
       )}
+      {!editing && <T muted style={[base.small, styles.tip]}>{hint}</T>}
 
       {editing ? (
         <View style={[base.content, { flex: 1 }]}>
@@ -353,7 +387,7 @@ export default function Builder() {
         </>
       )}
 
-      <EditSheet visible={!!sheet} title={sheet?.title ?? ''} fields={sheet?.fields ?? []} onClose={() => setAsking(null)} onSave={(d) => { setAsking(null); sheet?.onSave(d); }} />
+      <EditSheet visible={!!sheet} title={sheet?.title ?? ''} fields={sheet?.fields ?? []} onClose={() => { setAsking(null); setDrawn(null); }} onSave={(d) => { setAsking(null); setDrawn(null); sheet?.onSave(d); }} />
     </View>
   );
 }
@@ -384,6 +418,7 @@ const styles = StyleSheet.create({
   question: { fontSize: 22, fontFamily: fonts.headingBold, letterSpacing: -0.2 },
   lead: { fontSize: 15, lineHeight: 21 },
   list: { padding: 0, gap: 0, overflow: 'hidden' },
+  tip: { paddingHorizontal: space.lg, paddingTop: space.sm },
   head: { paddingHorizontal: 14, paddingVertical: 10 },
   item: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: 1, minHeight: 48 },
   swatch: { width: 10, height: 10, borderRadius: 2 },
