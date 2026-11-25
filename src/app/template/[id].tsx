@@ -1,15 +1,17 @@
 import { router, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useSQLiteContext } from 'expo-sqlite';
-import { useCallback, useState } from 'react';
-import { Linking, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { useCallback, useEffect, useState } from 'react';
+import { Image, Linking, Pressable, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { INDUSTRIES, type FieldDef, type FormTemplate } from '@inkstat/forms';
 
 import { deleteTemplate } from '@/db';
-import { allTemplates, hasSample } from '@/lib/reader';
+import { allTemplates, hasSample, samplePhoto } from '@/lib/reader';
 import { Button, Card, T } from '@/ui/components';
 import { useDialog } from '@/ui/Dialog';
+import { PageMarker } from '@/ui/PageMarker';
+import { shapesOf } from '@/ui/templateShapes';
 import { base, fonts, space, useColors } from '@/ui/theme';
 
 const KIND: Record<FieldDef['kind'], string> = {
@@ -33,13 +35,28 @@ export default function TemplateScreen() {
   const insets = useSafeAreaInsets();
   const dialog = useDialog();
   const { id } = useLocalSearchParams<{ id: string }>();
+  const { width: screenW } = useWindowDimensions();
   const [t, setT] = useState<FormTemplate | null>(null);
+  /** The page its boxes are drawn on: the user's photo, or a built-in's sample. */
+  const [page, setPage] = useState<{ uri: string; aspect: number } | null>(null);
 
   useFocusEffect(
     useCallback(() => {
       void allTemplates(db).then((all) => setT(all.find((x) => x.id === id) ?? null));
     }, [db, id]),
   );
+
+  const sampleId = t ? (t.builtinId ?? t.id) : '';
+  useEffect(() => {
+    if (!t) return;
+    let live = true;
+    void (t.photoUri ? Promise.resolve(t.photoUri) : hasSample(sampleId) ? samplePhoto(sampleId) : Promise.reject(new Error('no page')))
+      .then((uri) => Image.getSize(uri, (w, h) => live && setPage({ uri, aspect: w / h }), () => undefined))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [t, sampleId]);
 
   if (!t) return <View style={[base.screen, { backgroundColor: c.bg }]} />;
 
@@ -66,6 +83,21 @@ export default function TemplateScreen() {
             </Pressable>
           )}
         </Card>
+
+        {page && (
+          <Card style={styles.list}>
+            <View style={styles.head}>
+              <T style={base.h2}>Where it reads</T>
+              <T muted style={base.small}>
+                {builtin ? 'On the sample photo. To change a box, make a copy.' : 'On your photo. Edit to change a box.'}
+              </T>
+            </View>
+            {/* Display only: the screen scrolls over it. */}
+            <View pointerEvents="none">
+              <PageMarker uri={page.uri} aspect={page.aspect} width={screenW - space.lg * 2} height={Math.round((screenW - space.lg * 2) / page.aspect)} shapes={shapesOf(t)} allowDraw={false} />
+            </View>
+          </Card>
+        )}
 
         {t.fields.length > 0 && (
           <Card style={styles.list}>
@@ -115,6 +147,11 @@ export default function TemplateScreen() {
           <Button title="Test on the sample photo" size="lg" onPress={() => router.push({ pathname: '/scan', params: { template: t.id, sample: '1' } })} />
         )}
         <Button title="Test on my own photo" kind="secondary" onPress={() => router.push({ pathname: '/scan', params: { template: t.id } })} />
+        {builtin && (
+          <Pressable onPress={() => router.push({ pathname: '/builder', params: { copy: t.id } })} accessibilityRole="button" hitSlop={8} style={{ alignSelf: 'center' }}>
+            <T style={{ color: c.accent, fontFamily: fonts.bodySemiBold }}>Make a copy to edit</T>
+          </Pressable>
+        )}
         {!builtin && (
           <View style={[base.row, { justifyContent: 'space-between' }]}>
             <Pressable onPress={() => router.push({ pathname: '/builder', params: { id: t.id } })} accessibilityRole="button" hitSlop={8}>
