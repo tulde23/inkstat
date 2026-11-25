@@ -35,6 +35,14 @@ const SAMPLES: Record<string, number> = {
 
 export const hasSample = (templateId: string) => templateId in SAMPLES;
 
+/**
+ * A template lined up with a photo of its form by the printed words, as a read does:
+ * a sample is a photo, not the flat blank page the boxes were measured on.
+ */
+export async function alignedTo(t: FormTemplate, uri: string): Promise<FormTemplate> {
+  return templateForPhoto(t, await recognizePageText(uri).catch(() => null)).template;
+}
+
 /** The sample photo as a file the reader can crop. */
 export async function samplePhoto(templateId: string): Promise<string> {
   const src = Image.resolveAssetSource(SAMPLES[templateId])?.uri ?? '';

@@ -5,6 +5,7 @@ import {
   PanResponder,
   Pressable,
   StyleSheet,
+  Text,
   View,
   type GestureResponderEvent,
   type NativeTouchEvent,
@@ -369,10 +370,11 @@ export function PageMarker({
                 ? null
                 : { borderColor: sh.color, borderWidth: 1.5 / s, backgroundColor: sh.color + '1A', borderRadius: 3 / s },
             ]}>
-            {showLabels && sh.label && (
-              <T style={[styles.label, { backgroundColor: sh.color, fontSize: 10 / s, lineHeight: 14 / s, top: -15 / s, paddingHorizontal: 4 / s }]}>
+            {/* Names only when they fit: a busy page shows them once zoomed in. One line each. */}
+            {showLabels && sh.label && (shapes.length <= 12 || s >= 2) && (
+              <Text numberOfLines={1} style={[styles.label, { backgroundColor: sh.color, fontSize: 10 / s, lineHeight: 14 / s, top: -15 / s, paddingHorizontal: 4 / s }]}>
                 {sh.label}
-              </T>
+              </Text>
             )}
           </View>
         ))}
