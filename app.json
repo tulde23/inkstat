@@ -12,6 +12,7 @@
       "bundleIdentifier": "com.inkstat.app"
     },
     "android": {
+      "versionCode": 3,
       "package": "com.inkstat.app",
       "adaptiveIcon": {
         "backgroundColor": "#F7F3EA",
