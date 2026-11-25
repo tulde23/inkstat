@@ -11,10 +11,13 @@ apps:
     root: .
     android:
       id: com.inkstat.app
-      # No upload key yet: release builds are signed with the debug key. Once there is one,
-      # "fluxon keys import --only android" saves it to Keylo and fills these in.
-      # signing: keylo:inkstat/android-signing
-      # play: { key: keylo:inkstat/play, track: internal }
+      # The Play upload key, in Keylo under Android (keystore, alias, storePassword,
+      # keyPassword). Play App Signing holds the key that signs the app on phones; this one
+      # only proves an upload is ours, and Play Console can reset it if it's ever lost.
+      signing: keylo:inkstat/android-signing
+      # Orbit's Play service account, allowed to release InkStat too (same developer
+      # account): Fluxon asks Play for the highest version code with it, and uploads.
+      play: { key: keylo:orbit/play, track: internal }
     ios:
       scheme: InkStat
       id: com.inkstat.app
