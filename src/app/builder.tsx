@@ -10,7 +10,7 @@ import { namesIn, newFormTemplate, parseRule, type FieldDef, type FormTemplate, 
 
 import { getTemplate, saveTemplate } from '@/db';
 import { keepImage, newId } from '@/lib/files';
-import { allTemplates, hasSample, samplePhoto } from '@/lib/reader';
+import { alignedTo, allTemplates, hasSample, samplePhoto } from '@/lib/reader';
 import { Button, Card, T } from '@/ui/components';
 import { useDialog } from '@/ui/Dialog';
 import { EditSheet, type SheetField } from '@/ui/EditSheet';
@@ -93,8 +93,12 @@ export default function Builder() {
     void (params.id ? getTemplate(db, params.id) : Promise.resolve(null)).then(async (t) => {
       if (t) return start(t.photoUri, t);
       if (params.copy) {
-        const from = (await allTemplates(db)).find((x) => x.id === params.copy);
-        if (!from) return;
+        const found = (await allTemplates(db)).find((x) => x.id === params.copy);
+        if (!found) return;
+        const sampleId = found.builtinId ?? found.id;
+        const photo = found.photoUri ?? (hasSample(sampleId) ? await samplePhoto(sampleId).catch(() => null) : null);
+        // Boxes where they are on this photo, not on the flat blank form.
+        const from = photo && !found.photoUri ? await alignedTo(found, photo) : found;
         const now = Date.now();
         // Its own template beside the built-in, which stays as it is.
         const copy: FormTemplate = {
@@ -106,8 +110,6 @@ export default function Builder() {
           createdAt: now,
           updatedAt: now,
         };
-        const sampleId = from.builtinId ?? from.id;
-        const photo = from.photoUri ?? (hasSample(sampleId) ? await samplePhoto(sampleId).catch(() => null) : null);
         if (photo) start(photo, { ...copy, photoUri: photo });
         else setSeed(copy);
         return;
@@ -341,7 +343,7 @@ export default function Builder() {
         <>
           <ScrollView contentContainerStyle={[base.content, { paddingBottom: 140 }]}>
             <Pressable onPress={() => setAsking({ kind: 'name' })} accessibilityRole="button" style={[base.row, { justifyContent: 'space-between' }]}>
-              <T style={base.h2}>{tpl.name}</T>
+              <T style={[base.h2, { flex: 1 }]}>{tpl.name}</T>
               <T style={{ color: c.accent, fontFamily: fonts.bodySemiBold }}>Rename</T>
             </Pressable>
 

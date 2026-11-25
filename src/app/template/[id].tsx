@@ -7,7 +7,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { INDUSTRIES, type FieldDef, type FormTemplate } from '@inkstat/forms';
 
 import { deleteTemplate } from '@/db';
-import { allTemplates, hasSample, samplePhoto } from '@/lib/reader';
+import { alignedTo, allTemplates, hasSample, samplePhoto } from '@/lib/reader';
 import { Button, Card, T } from '@/ui/components';
 import { useDialog } from '@/ui/Dialog';
 import { PageMarker } from '@/ui/PageMarker';
@@ -38,7 +38,7 @@ export default function TemplateScreen() {
   const { width: screenW } = useWindowDimensions();
   const [t, setT] = useState<FormTemplate | null>(null);
   /** The page its boxes are drawn on: the user's photo, or a built-in's sample. */
-  const [page, setPage] = useState<{ uri: string; aspect: number } | null>(null);
+  const [page, setPage] = useState<{ uri: string; aspect: number; boxes: FormTemplate } | null>(null);
 
   useFocusEffect(
     useCallback(() => {
@@ -50,9 +50,14 @@ export default function TemplateScreen() {
   useEffect(() => {
     if (!t) return;
     let live = true;
-    void (t.photoUri ? Promise.resolve(t.photoUri) : hasSample(sampleId) ? samplePhoto(sampleId) : Promise.reject(new Error('no page')))
-      .then((uri) => Image.getSize(uri, (w, h) => live && setPage({ uri, aspect: w / h }), () => undefined))
-      .catch(() => undefined);
+    // The user's own template was drawn on its own photo; a built-in is lined up with its sample.
+    const load = async () => {
+      const uri = t.photoUri ?? (hasSample(sampleId) ? await samplePhoto(sampleId) : null);
+      if (!uri) return;
+      const boxes = t.photoUri ? t : await alignedTo(t, uri);
+      Image.getSize(uri, (w, h) => live && setPage({ uri, aspect: w / h, boxes }), () => undefined);
+    };
+    void load().catch(() => undefined);
     return () => {
       live = false;
     };
@@ -94,7 +99,7 @@ export default function TemplateScreen() {
             </View>
             {/* Display only: the screen scrolls over it. */}
             <View pointerEvents="none">
-              <PageMarker uri={page.uri} aspect={page.aspect} width={screenW - space.lg * 2} height={Math.round((screenW - space.lg * 2) / page.aspect)} shapes={shapesOf(t)} allowDraw={false} />
+              <PageMarker uri={page.uri} aspect={page.aspect} width={screenW - space.lg * 2} height={Math.round((screenW - space.lg * 2) / page.aspect)} shapes={shapesOf(page.boxes)} allowDraw={false} />
             </View>
           </Card>
         )}
